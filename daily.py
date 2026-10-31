@@ -26,7 +26,7 @@ import requests
 from macro import LONDON, get_headlines, headlines_block, kraken_closes
 from scanner import CLAUDE_MODEL, _finnhub, load_universe, send_telegram
 
-NAME = "Jordan"
+NAME = "there"
 SEND_HOUR_LONDON = 7
 
 LEVELS = [  # label, source, symbol, decimals
