@@ -40,7 +40,7 @@ NEWS_MODEL = os.environ.get("NEWS_MODEL", "claude-haiku-5-5")
 MIN_IMPORTANCE = int(os.environ.get("NEWS_MIN_IMPORTANCE", "2"))
 LOOKBACK_MIN = 75          # look back a bit more than the 30-min cadence (cron can be late)
 MAX_CANDIDATES = 90
-MAX_PER_DIGEST = 10
+MAX_PER_DIGEST = 15
 
 
 def gnews(q: str) -> str:
@@ -250,10 +250,16 @@ trader would want to know about now. Score importance:
  3 = top-tier: central bank decisions/surprise comments, major data surprises, tariffs/sanctions, \
      geopolitical escalation, big market moves/halts, major M&A or earnings shocks in mega-caps, \
      large crypto/metals-specific events.
- 2 = clearly relevant: scheduled data in line, notable official comments, sector/company news \
-     with plausible market impact, metals supply/demand news.
-Ignore: opinion pieces, explainers, listicles, personal finance, "stocks to buy", stale recaps, \
-promotional content, minor company news.
+ 2 = plausibly market-relevant (be inclusive): any economic data, any central-bank or \
+     finance-ministry comment, geopolitics and conflict (Russia/Ukraine, Middle East, China/Taiwan, \
+     shipping lanes, energy infrastructure, sanctions), elections and major political news in \
+     big economies, trade and tariff news, commodity supply/demand (oil, gas, metals, mining \
+     strikes), notable company news for large caps, crypto market and regulatory news, \
+     sentiment gauges and positioning data.
+When unsure whether something is a 2, include it.
+Ignore only: opinion pieces, explainers, listicles, personal finance, "stocks to buy", \
+promotional content, sports/entertainment, minor credit-rating actions on small private \
+companies, and news about small companies with no wider read-across.
 
 Group headlines about the same story into one entry (list all their ids). Write a crisp \
 one-line headline in wire style (no source names), a short why-it-matters, and affected assets. \
