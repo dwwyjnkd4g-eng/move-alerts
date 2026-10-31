@@ -191,19 +191,20 @@ def finnhub_headlines(since: datetime, categories=("general", "forex", "crypto")
     return out
 
 
-def get_headlines(hours: float, limit: int = 40) -> list[dict]:
+def get_headlines(hours: float, limit: int = 60) -> list[dict]:
+    """Recent headlines from all news sources (see news.py FEEDS), deduped, newest first."""
+    from news import fetch_all
+
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    items = financialjuice_headlines(since) + finnhub_headlines(since)
-    items.sort(key=lambda x: x["ts"], reverse=True)
-    seen, out = set(), []
-    for it in items:
-        k = it["headline"].lower()[:80]
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(it)
-        if len(out) >= limit:
-            break
+    try:
+        items = fetch_all(since)
+    except Exception as e:
+        print(f"news fetch failed: {e}", file=sys.stderr)
+        items = financialjuice_headlines(since) + finnhub_headlines(since)
+    out = []
+    for it in items[:limit]:
+        srcs = it.get("sources") or [it["source"]]
+        out.append({**it, "source": " / ".join(srcs[:3])})
     return out
 
 
