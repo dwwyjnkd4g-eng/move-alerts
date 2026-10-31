@@ -2,23 +2,18 @@ name: US move alerts
 
 on:
   schedule:
-    # Times are UTC. Every 15 min across a window wide enough to cover the US
-    # session in both summer and winter time; the gate step below skips runs
-    # outside 09:45-16:00 New York time, so clock changes need no edits.
-    - cron: "*/15 13-20 * * 1-5"
-    # After the close (EOD summary + any late movers).
-    - cron: "35 21 * * 1-5"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       mode:
-        description: "auto | intraday | eod"
+        description: "auto | intraday | eod | pre | post"
         default: "auto"
 
 permissions:
-  contents: write   # to commit alerts_log.csv back to the repo
+  contents: write
 
 concurrency:
-  group: move-alerts
+  group: move-alerts-equity
   cancel-in-progress: false
 
 jobs:
@@ -26,51 +21,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Gate on US session
-        id: gate
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "mode=${{ github.event.inputs.mode || 'auto' }}" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if [[ "${{ github.event.schedule }}" == "35 21 * * 1-5" ]]; then
-            echo "mode=eod" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          hm=$(TZ=America/New_York date +%H%M)
-          if (( 10#$hm >= 945 && 10#$hm < 1600 )); then
-            echo "mode=intraday" >> "$GITHUB_OUTPUT"
-          else
-            echo "Outside US session ($hm ET) - skipping."
-            echo "mode=skip" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.mode != 'skip'
-
       - uses: actions/setup-python@v5
-        if: steps.gate.outputs.mode != 'skip'
         with:
           python-version: "3.12"
           cache: pip
-
       - run: pip install -r requirements.txt
-        if: steps.gate.outputs.mode != 'skip'
-
       - name: Run scanner
-        if: steps.gate.outputs.mode != 'skip'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python scanner.py --mode "${{ steps.gate.outputs.mode }}"
-
-      - name: Commit alert log
-        if: steps.gate.outputs.mode != 'skip'
+        run: python scanner.py --mode "${{ github.event.inputs.mode || 'auto' }}"
+      - name: Save log
+        if: always()
         run: |
-          if [[ -n "$(git status --porcelain alerts_log.csv)" ]]; then
+          if [[ -n "$(git status --porcelain alerts_log.csv equity_state.json)" ]]; then
             git config user.name "move-alerts bot"
             git config user.email "actions@users.noreply.github.com"
-            git add alerts_log.csv
-            git commit -m "Log alerts $(date -u +%F_%H%M)"
-            git push
+            for f in alerts_log.csv equity_state.json; do [[ -f $f ]] && git add "$f"; done
+            git commit -m "Equity log $(date -u +%F_%H%M)"
+            for i in 1 2 3; do git pull --rebase && git push && break; sleep 5; done
           fi
