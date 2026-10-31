@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: move-alerts
+  group: move-alerts-macro
   cancel-in-progress: false
 
 jobs:
@@ -42,5 +42,5 @@ jobs:
             git config user.email "actions@users.noreply.github.com"
             for f in macro_state.json news_state.json; do [[ -f $f ]] && git add "$f"; done
             git commit -m "State $(date -u +%F_%H%M)"
-            git pull --rebase && git push
+            for i in 1 2 3; do git pull --rebase && git push && break; sleep 5; done
           fi
