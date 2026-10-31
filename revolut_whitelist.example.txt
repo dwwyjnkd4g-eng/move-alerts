@@ -1,0 +1,5 @@
+# Rename to revolut_whitelist.txt to restrict scanning to these tickers.
+# One S&P 500 symbol per line (use BRK.B style, not BRK-B).
+AAPL
+MSFT
+NVDA

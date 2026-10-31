@@ -1,0 +1,6 @@
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+lxml>=5.0
+yfinance>=0.2.50
+anthropic>=0.40
