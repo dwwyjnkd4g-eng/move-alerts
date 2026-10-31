@@ -1,5 +1,7 @@
 """
-24/7 macro move alerts: USD, precious metals, bitcoin.
+24/7 global macro move alerts: USD/FX, precious metals, bitcoin, US index
+futures (covering pre-market/after-hours/overnight), global indices, rates,
+energy and copper.
 
 Every run (hourly by default) checks 15-minute bars for big moves over the
 last 1h and 4h, scaled by each instrument's own recent volatility. A flagged
@@ -37,15 +39,44 @@ LONDON = __import__("zoneinfo").ZoneInfo("Europe/London")
 
 # name, source, symbol, minimum % move to alert (as fraction)
 INSTRUMENTS = [
+    # Crypto (24/7)
     ("Bitcoin", "kraken", "XBTUSD", 0.025),
+    # Precious metals (CME, ~23/5)
     ("Gold", "yf", "GC=F", 0.008),
     ("Silver", "yf", "SI=F", 0.015),
     ("Platinum", "yf", "PL=F", 0.015),
     ("Palladium", "yf", "PA=F", 0.020),
+    # USD / FX (24/5)
     ("DXY (USD index)", "yf", "DX-Y.NYB", 0.003),
     ("EURUSD", "yf", "EURUSD=X", 0.003),
+    ("GBPUSD", "yf", "GBPUSD=X", 0.003),
     ("USDJPY", "yf", "JPY=X", 0.004),
+    ("USDCHF", "yf", "CHF=X", 0.003),
+    ("AUDUSD", "yf", "AUDUSD=X", 0.004),
+    ("USDCAD", "yf", "CAD=X", 0.003),
     ("USDCNH", "yf", "CNH=X", 0.002),
+    ("USDMXN", "yf", "MXN=X", 0.006),
+    # US equity index futures (~23/5) — cover pre-market, after-hours and overnight
+    ("S&P 500 futures", "yf", "ES=F", 0.006),
+    ("Nasdaq 100 futures", "yf", "NQ=F", 0.008),
+    ("Russell 2000 futures", "yf", "RTY=F", 0.010),
+    ("Dow futures", "yf", "YM=F", 0.006),
+    ("Nikkei futures (CME)", "yf", "NIY=F", 0.010),
+    # Global cash indices (their own local hours)
+    ("FTSE 100", "yf", "^FTSE", 0.007),
+    ("DAX", "yf", "^GDAXI", 0.008),
+    ("Euro Stoxx 50", "yf", "^STOXX50E", 0.008),
+    ("Hang Seng", "yf", "^HSI", 0.012),
+    ("Shanghai Composite", "yf", "000001.SS", 0.010),
+    ("VIX", "yf", "^VIX", 0.080),
+    # Rates (futures ~23/5; yield index = cash hours)
+    ("US 10y note futures", "yf", "ZN=F", 0.003),
+    ("US 10y yield", "yf", "^TNX", 0.015),
+    # Energy / industrial metals
+    ("WTI crude", "yf", "CL=F", 0.015),
+    ("Brent crude", "yf", "BZ=F", 0.015),
+    ("Natural gas", "yf", "NG=F", 0.030),
+    ("Copper", "yf", "HG=F", 0.010),
 ]
 # Weekend / out-of-hours gold proxy: only used when gold futures are closed.
 PAXG = ("Gold (PAXG token, 24/7 proxy)", "kraken", "PAXGUSD", 0.008)
@@ -219,7 +250,8 @@ def headlines_block(items: list[dict]) -> str:
 # Claude
 # --------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are a macro strategist supporting a discretionary trader who fades \
-large moves in USD, precious metals and bitcoin. You get move statistics, a snapshot of \
+large moves across global macro: USD and FX, precious metals, bitcoin, US and global equity \
+indices and futures, rates, energy and copper. You get move statistics, a snapshot of \
 related markets, and numbered headlines.
 
 Rules:

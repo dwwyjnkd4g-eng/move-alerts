@@ -69,6 +69,8 @@ FEEDS = {
     "Google News: Reuters/Bloomberg": gnews('(site:reuters.com OR site:bloomberg.com) markets when:2h'),
 }
 FINNHUB_CATEGORIES = ("general", "forex", "crypto", "merger")
+# Public Telegram channels read via their web preview (t.me/s/<name>).
+TELEGRAM_CHANNELS = {"FinancialJuice": "financialjuice"}
 UA = {"User-Agent": "Mozilla/5.0 (move-alerts news reader)"}
 
 
@@ -142,6 +144,33 @@ def fetch_feed(name: str, url: str) -> tuple[str, list[dict], str | None]:
         return name, [], f"{e.__class__.__name__}: {str(e)[:80]}"
 
 
+def parse_tg_preview(page: str, label: str, channel: str) -> list[dict]:
+    out = []
+    for block in re.split(r'<div class="tgme_widget_message_wrap', page)[1:]:
+        post = re.search(r'data-post="([^"]+)"', block)
+        txt = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', block, re.S)
+        ts = re.search(r'<time[^>]*datetime="([^"]+)"', block)
+        if not (txt and ts):
+            continue
+        text = html.unescape(re.sub(r"<br\s*/?>", " ", txt.group(1)))
+        text = re.sub(r"<[^>]+>", "", text).strip()
+        t = _parse_ts(ts.group(1))
+        if text and t:
+            url = f"https://t.me/{post.group(1)}" if post else f"https://t.me/s/{channel}"
+            out.append({"ts": t, "source": label, "headline": text[:300], "url": url, "feed": f"{label} (Telegram)"})
+    return out
+
+
+def fetch_tg(label: str, channel: str) -> tuple[str, list[dict], str | None]:
+    name = f"{label} (Telegram)"
+    try:
+        r = requests.get(f"https://t.me/s/{channel}", headers=UA, timeout=15)
+        r.raise_for_status()
+        return name, parse_tg_preview(r.text, label, channel), None
+    except Exception as e:
+        return name, [], f"{e.__class__.__name__}: {str(e)[:80]}"
+
+
 def fetch_finnhub() -> list[dict]:
     out = []
     for cat in FINNHUB_CATEGORIES:
@@ -182,6 +211,7 @@ def dedupe(items: list[dict]) -> list[dict]:
 def fetch_all(since: datetime, verbose: bool = False) -> list[dict]:
     with ThreadPoolExecutor(max_workers=10) as ex:
         results = list(ex.map(lambda kv: fetch_feed(*kv), FEEDS.items()))
+        results += list(ex.map(lambda kv: fetch_tg(*kv), TELEGRAM_CHANNELS.items()))
     items = []
     for name, got, err in results:
         fresh = [x for x in got if x["ts"] >= since]
@@ -194,6 +224,15 @@ def fetch_all(since: datetime, verbose: bool = False) -> list[dict]:
     return dedupe(items + fh)
 
 
+def source_health() -> tuple[int, int, list[str]]:
+    """(responding, total, failing names) — for the daily brief."""
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        results = list(ex.map(lambda kv: fetch_feed(*kv), FEEDS.items()))
+        results += list(ex.map(lambda kv: fetch_tg(*kv), TELEGRAM_CHANNELS.items()))
+    failing =[name for name, got, err in results if err or not got]
+    return len(results) - len(failing), len(results), failing
+
+
 def item_id(it: dict) -> str:
     return hashlib.sha1(_norm(it["headline"]).encode()).hexdigest()[:16]
 
@@ -201,8 +240,10 @@ def item_id(it: dict) -> str:
 # --------------------------------------------------------------------------
 # Claude triage
 # --------------------------------------------------------------------------
-TRIAGE_PROMPT = """You filter a live news wire for a UK-based trader who trades USD, precious \
-metals (gold, silver, PGMs), bitcoin, and large single-stock moves in US equities.
+TRIAGE_PROMPT = """You filter a live news wire for a UK-based trader who trades global macro \
+(USD and FX, rates, equity indices and futures, oil, copper), precious metals (gold, silver, \
+PGMs), bitcoin, and large single-stock moves in US equities including pre-market and after-hours."""
+TRIAGE_PROMPT += """
 
 From the numbered headlines, select only those likely to move those markets or that a macro \
 trader would want to know about now. Score importance:

@@ -41,8 +41,14 @@ LEVELS = [  # label, source, symbol, decimals
     ("PAXG (24/7 gold)", "kraken", "PAXGUSD", 1),
     ("S&P fut", "yf", "ES=F", 1),
     ("Nasdaq fut", "yf", "NQ=F", 1),
+    ("FTSE 100", "yf", "^FTSE", 1),
+    ("DAX", "yf", "^GDAXI", 1),
+    ("Nikkei 225", "yf", "^N225", 0),
+    ("Hang Seng", "yf", "^HSI", 0),
+    ("VIX", "yf", "^VIX", 2),
     ("US 10y %", "yf", "^TNX", 3),
     ("Brent", "yf", "BZ=F", 2),
+    ("Copper", "yf", "HG=F", 3),
 ]
 FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 WORKFLOWS = {"alerts.yml": "Equity alerts", "macro.yml": "Macro alerts"}
@@ -199,6 +205,13 @@ def build_messages(now: datetime) -> list[str]:
 
     hello = [f"👋 Morning {NAME} — bot is alive. {local:%A %d %b %Y}", ""]
     hello += [e(x) for x in health_lines(now)]
+    try:
+        from news import source_health
+        ok, total, failing = source_health()
+        hello.append(f"{'✅' if not failing else '⚠️'} News sources: {ok}/{total} responding"
+                     + (f" (not: {e(', '.join(failing))})" if failing else ""))
+    except Exception as ex:
+        hello.append(f"⚠️ News sources: check failed ({ex.__class__.__name__})")
 
     lv = levels(now)
     cal = [] if weekend else calendar_today(local.date())

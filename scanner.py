@@ -26,6 +26,7 @@ import argparse
 import html
 import io
 import json
+import math
 import os
 import sys
 import time
@@ -203,6 +204,126 @@ def select_movers(m: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
+# Extended hours (pre-market / after-hours)
+# --------------------------------------------------------------------------
+MIN_EXT_DOLLAR_VOL = 1e6     # traded since the close, to ignore stale single prints
+EXT_FRESH_MIN = 45
+FUTURES = "ES=F"             # S&P 500 futures = market move outside cash hours
+
+
+def session_now(now_et: datetime) -> str | None:
+    """pre 04:00-09:45 | regular 09:45-16:00 | close 16:00-16:30 | post 16:30-20:00 (ET, weekdays)."""
+    if now_et.weekday() >= 5:
+        return None
+    hm = now_et.hour * 100 + now_et.minute
+    if 400 <= hm < 945:
+        return "pre"
+    if 945 <= hm < 1600:
+        return "regular"
+    if 1600 <= hm < 1630:
+        return "close"
+    if 1630 <= hm < 2000:
+        return "post"
+    return None
+
+
+def download_intraday(yf_symbols: list[str]) -> dict[str, pd.DataFrame]:
+    import yfinance as yf
+
+    raw = yf.download(yf_symbols, period="5d", interval="15m", prepost=True,
+                      auto_adjust=False, group_by="column", threads=True, progress=False)
+    out = {}
+    for field in ("Close", "Volume"):
+        f = raw[field]
+        if isinstance(f, pd.Series):
+            f = f.to_frame(yf_symbols[0])
+        idx = f.index if f.index.tz is not None else f.index.tz_localize("UTC")
+        f.index = idx.tz_convert(ET)
+        out[field.lower()] = f.sort_index()
+    return out
+
+
+def _is_regular_bar(ts: pd.Timestamp) -> bool:
+    hm = ts.hour * 100 + ts.minute
+    return 930 <= hm < 1600
+
+
+def compute_extended(
+    daily_close: pd.DataFrame,
+    intra_close: pd.DataFrame,
+    intra_vol: pd.DataFrame,
+    symbols: list[str],
+    now_et: datetime,
+) -> pd.DataFrame:
+    """Move since the last regular-session close, adjusted for the S&P futures move."""
+    fut = intra_close[FUTURES].dropna() if FUTURES in intra_close else pd.Series(dtype=float)
+    spy_d = np.log(daily_close[MARKET_ETF]).diff()
+    rows = []
+    for sym in symbols:
+        if sym not in intra_close or sym not in daily_close:
+            continue
+        c = intra_close[sym].dropna()
+        if c.empty:
+            continue
+        reg = c[[_is_regular_bar(t) for t in c.index]]
+        if reg.empty:
+            continue
+        ref_ts, ref = reg.index[-1], float(reg.iloc[-1])
+        ext = c[c.index > ref_ts]
+        if ext.empty or (now_et - ext.index[-1].to_pydatetime()) > timedelta(minutes=EXT_FRESH_MIN):
+            continue
+        last = float(ext.iloc[-1])
+        v = intra_vol[sym].reindex(ext.index).fillna(0)
+        ext_dv = float((ext * v).sum())
+
+        # daily history up to the reference session
+        d = daily_close[sym]
+        d = d[d.index.date <= ref_ts.date()].dropna()
+        sd = np.log(d).diff()
+        sp = spy_d.reindex(sd.index)
+        hs, hb = sd.iloc[-BETA_WINDOW:], sp.iloc[-BETA_WINDOW:]
+        if len(hs.dropna()) < 60:
+            continue
+        beta = hs.cov(hb) / hb.var() if hb.var() > 0 else 1.0
+        resid_sd = (hs - beta * hb).iloc[-RESID_WINDOW:].std()
+        vol20 = hs.iloc[-VOL_WINDOW:].std()
+
+        mkt = 0.0
+        if len(fut):
+            f_ref = fut[fut.index <= ref_ts]
+            if len(f_ref):
+                mkt = float(fut.iloc[-1] / f_ref.iloc[-1] - 1)
+        r = math.log(last / ref)
+        idio = r - beta * math.log1p(mkt)
+        win = d.iloc[-252:]
+        rows.append({
+            "yf_symbol": sym, "etf": "S&P fut", "price": last, "ret": math.expm1(r),
+            "z": r / vol20 if vol20 > 0 else np.nan, "beta": beta, "sector_ret": mkt,
+            "idio_ret": math.expm1(idio), "idio_z": idio / resid_sd if resid_sd > 0 else np.nan,
+            "gap": np.nan, "rvol": np.nan, "ext_dollar_vol": ext_dv,
+            "ret_5d_prior": float(d.iloc[-1] / d.iloc[-6] - 1) if len(d) > 6 else np.nan,
+            "dist_52w_high": last / win.max() - 1, "dist_52w_low": last / win.min() - 1,
+        })
+    return pd.DataFrame(rows)
+
+
+def select_extended(m: pd.DataFrame, adv: pd.Series) -> pd.DataFrame:
+    if m.empty:
+        return m
+    m = m.copy()
+    m["adv_usd"] = m["yf_symbol"].map(adv)
+    f = m[
+        (m["idio_z"].abs() >= MIN_IDIO_Z)
+        & (m["ret"].abs() >= MIN_ABS_RET)
+        & (m["price"] >= MIN_PRICE)
+        & (m["adv_usd"] >= MIN_DOLLAR_VOL)
+        & (m["ext_dollar_vol"] >= MIN_EXT_DOLLAR_VOL)
+    ].copy()
+    f["abs_idio_z"] = f["idio_z"].abs()
+    return f.sort_values("abs_idio_z", ascending=False).head(MAX_ALERTS_PER_RUN)
+
+
+# --------------------------------------------------------------------------
 # Context: Finnhub news + earnings
 # --------------------------------------------------------------------------
 FINNHUB = "https://finnhub.io/api/v1"
@@ -283,6 +404,9 @@ technical breaks, squeezes, moves with no catalyst at all.
 - Weigh: idiosyncratic size (idio_z) vs raw move; whether the sector moved; relative volume; \
 gap vs intraday trend; prior 5-day move (exhaustion?) and position vs 52-week range; and whether \
 earnings were just reported or are imminent (event risk for a fade).
+- Pre-market / after-hours moves: liquidity is thin and prices can overshoot, but these sessions \
+are also when earnings and major news land, so an extended-hours move WITH a clear catalyst is \
+usually information. Here the benchmark is S&P 500 futures, not a sector ETF.
 """
 
 EXPLAIN_TOOL = {
@@ -311,21 +435,26 @@ EXPLAIN_TOOL = {
 
 
 def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dict], mode: str) -> str:
+    def r(x, k=100, d=2):
+        return None if pd.isna(x) else round(float(x) * k, d)
+
     stats = {
-        "ticker": row["symbol"], "company": name, "sector_etf": row["etf"],
-        "data_as_of": "live intraday" if mode == "intraday" else "official close",
-        "move_pct": round(row["ret"] * 100, 2),
-        "move_in_own_vol_sigmas": round(row["z"], 2),
-        "beta_to_sector": round(row["beta"], 2),
-        "sector_etf_move_pct": round(row["sector_ret"] * 100, 2),
-        "idiosyncratic_move_pct": round(row["idio_ret"] * 100, 2),
-        "idiosyncratic_sigmas": round(row["idio_z"], 2),
-        "gap_at_open_pct": round(row["gap"] * 100, 2),
-        "relative_volume_x": round(row["rvol"], 2),
-        "prior_5d_move_pct": round(row["ret_5d_prior"] * 100, 2),
-        "pct_from_52w_high": round(row["dist_52w_high"] * 100, 1),
-        "pct_from_52w_low": round(row["dist_52w_low"] * 100, 1),
+        "ticker": row["symbol"], "company": name, "benchmark": row["etf"],
+        "data_as_of": AS_OF.get(mode, mode),
+        "move_pct": r(row["ret"]),
+        "move_in_own_vol_sigmas": r(row["z"], 1),
+        "beta_to_benchmark": r(row["beta"], 1),
+        "benchmark_move_pct": r(row["sector_ret"]),
+        "idiosyncratic_move_pct": r(row["idio_ret"]),
+        "idiosyncratic_sigmas": r(row["idio_z"], 1),
+        "gap_at_open_pct": r(row.get("gap")),
+        "relative_volume_x": r(row.get("rvol"), 1),
+        "extended_hours_dollar_volume_m": r(row.get("ext_dollar_vol"), 1e-6, 1),
+        "prior_5d_move_pct": r(row["ret_5d_prior"]),
+        "pct_from_52w_high": r(row["dist_52w_high"], 100, 1),
+        "pct_from_52w_low": r(row["dist_52w_low"], 100, 1),
     }
+    stats = {k: v for k, v in stats.items() if v is not None}
     news_txt = "\n".join(
         f"[{i}] {n['time_et']} | {n['source']} | {n['headline']}\n    {n['summary']}"
         for i, n in enumerate(news, 1)
@@ -367,17 +496,27 @@ def sanitize_assessment(a: dict, n_news: int) -> dict:
 # Telegram
 # --------------------------------------------------------------------------
 VERDICT_LABEL = {"fade_candidate": "FADE CANDIDATE", "do_not_fade": "DON'T FADE", "unclear": "UNCLEAR"}
+TAG = {"intraday": "live", "eod": "close", "pre": "pre-market", "post": "after-hours"}
+AS_OF = {"intraday": "live intraday", "eod": "official close",
+         "pre": "pre-market, vs prior regular close", "post": "after-hours, vs today's regular close"}
 
 
 def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str) -> str:
     e = html.escape
     arrow = "🔺" if row["ret"] > 0 else "🔻"
-    tag = "live" if mode == "intraday" else "close"
+    tag = TAG.get(mode, mode)
+    if mode in ("pre", "post"):
+        stats_line = (f"S&amp;P fut {row['sector_ret']*100:+.1f}% · β {row['beta']:.2f} · "
+                      f"${row['ext_dollar_vol']/1e6:,.1f}m traded since close · "
+                      f"prior 5d {row['ret_5d_prior']*100:+.1f}%")
+    else:
+        stats_line = (f"{e(row['etf'])} {row['sector_ret']*100:+.1f}% · β {row['beta']:.2f} · "
+                      f"RVOL {row['rvol']:.1f}x · gap {row['gap']*100:+.1f}% · "
+                      f"prior 5d {row['ret_5d_prior']*100:+.1f}%")
     lines = [
         f"{arrow} <b>{e(row['symbol'])}</b> {row['ret']*100:+.1f}%  "
         f"(idio {row['idio_z']:+.1f}σ) · {e(name)} [{tag}]",
-        f"{e(row['etf'])} {row['sector_ret']*100:+.1f}% · β {row['beta']:.2f} · RVOL {row['rvol']:.1f}x · "
-        f"gap {row['gap']*100:+.1f}% · prior 5d {row['ret_5d_prior']*100:+.1f}%",
+        stats_line,
         "",
         f"<b>Catalyst:</b> {e(a['catalyst_type'].replace('_', ' '))} — {e(a['catalyst_summary'])}",
         f"<b>Nature:</b> {e(a['move_nature'])} → <b>{VERDICT_LABEL.get(a['verdict'], a['verdict'])}</b> "
@@ -420,6 +559,17 @@ LOG_COLS = ["run_ts_utc", "date", "mode", "symbol", "price", "ret", "z", "idio_z
             "verdict", "confidence", "catalyst_summary"]
 
 
+SESSION_GROUP = {"intraday": "regular", "eod": "regular", "pre": "pre", "post": "post"}
+EQUITY_STATE_PATH = HERE / "equity_state.json"
+
+
+def load_equity_state() -> dict:
+    try:
+        return json.loads(EQUITY_STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+
 def load_log() -> pd.DataFrame:
     if LOG_PATH.exists():
         return pd.read_csv(LOG_PATH)
@@ -438,10 +588,12 @@ def append_log(records: list[dict]) -> None:
 # --------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["auto", "intraday", "eod"], default="auto")
+    ap.add_argument("--mode", choices=["auto", "intraday", "eod", "pre", "post"], default="auto")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--tickers", help="comma-separated subset (S&P 500 symbols)")
     ap.add_argument("--test-telegram", action="store_true")
+    ap.add_argument("--latest", action="store_true",
+                    help="scan the most recent trading day even on weekends/holidays (manual runs)")
     args = ap.parse_args()
 
     if args.test_telegram:
@@ -450,37 +602,57 @@ def main() -> int:
 
     now_et = datetime.now(ET)
     today = now_et.date()
-    if now_et.weekday() >= 5:
-        print("Weekend — nothing to do.")
-        return 0
     mode = args.mode
-    if mode == "auto":
-        mode = "eod" if now_et.hour >= 16 else "intraday"
-    if mode == "intraday" and (now_et.hour, now_et.minute) < (9, 45):
-        print("Too early in the session.")
-        return 0
+    if args.latest:
+        mode = "eod"
+    elif mode == "auto":
+        session = session_now(now_et)
+        if session is None:
+            print(f"Outside US trading sessions ({now_et:%a %H:%M} ET) — nothing to do.")
+            return 0
+        mode = {"pre": "pre", "regular": "intraday", "close": "eod", "post": "post"}[session]
 
     uni = load_universe()
     if args.tickers:
         wanted = {t.strip().upper() for t in args.tickers.split(",")}
         uni = uni[uni["symbol"].isin(wanted)]
     print(f"Universe: {len(uni)} names, mode={mode}")
+    yf_syms = list(uni["yf_symbol"])
 
-    etfs = sorted(set(uni["etf"]) | {MARKET_ETF})
-    px = download_prices(list(uni["yf_symbol"]) + etfs)
-    last_bar = px["close"].index[-1].date()
-    if last_bar != today:
-        print(f"No bar for {today} (last {last_bar}) — market holiday or data delay.")
-        return 0
-
-    vol_scale = session_fraction(now_et) if mode == "intraday" else 1.0
-    m = compute_metrics(px["close"], px["open"], px["volume"],
-                        dict(zip(uni["yf_symbol"], uni["etf"])), vol_scale)
-    m = m.merge(uni[["yf_symbol", "symbol", "name"]], on="yf_symbol")
-    movers = select_movers(m)
+    if mode in ("pre", "post"):
+        daily = download_prices(yf_syms + [MARKET_ETF])
+        dv = (daily["close"] * daily["volume"]).iloc[-VOL_WINDOW - 1:-1].mean()
+        intra = download_intraday(yf_syms + [FUTURES])
+        m = compute_extended(daily["close"], intra["close"], intra["volume"], yf_syms, now_et)
+        if m.empty:
+            print("No extended-hours trading data yet.")
+            return 0
+        m = m.merge(uni[["yf_symbol", "symbol", "name"]], on="yf_symbol")
+        movers = select_extended(m, dv)
+    else:
+        etfs = sorted(set(uni["etf"]) | {MARKET_ETF})
+        px = download_prices(yf_syms + etfs)
+        last_bar = px["close"].index[-1].date()
+        if last_bar != today:
+            if args.latest:
+                print(f"Using latest trading day {last_bar}.")
+                today = last_bar
+            else:
+                print(f"No bar for {today} (last {last_bar}) — market holiday or data delay.")
+                return 0
+        vol_scale = session_fraction(now_et) if mode == "intraday" else 1.0
+        m = compute_metrics(px["close"], px["open"], px["volume"],
+                            dict(zip(uni["yf_symbol"], uni["etf"])), vol_scale)
+        m = m.merge(uni[["yf_symbol", "symbol", "name"]], on="yf_symbol")
+        movers = select_movers(m)
 
     log = load_log()
-    already = set(log.loc[log["date"] == today.isoformat(), "symbol"]) if len(log) else set()
+    group = SESSION_GROUP.get(mode, mode)
+    if len(log):
+        same = (log["date"] == today.isoformat()) & (log["mode"].map(lambda x: SESSION_GROUP.get(x, x)) == group)
+        already = set(log.loc[same, "symbol"])
+    else:
+        already = set()
     new_movers = movers[~movers["symbol"].isin(already)]
     print(f"Flagged {len(movers)} ({len(new_movers)} new).")
 
@@ -511,12 +683,15 @@ def main() -> int:
                                  "confidence", "catalyst_summary"]},
         })
 
-    if mode == "eod" and len(movers) and not args.dry_run:
+    state = load_equity_state()
+    if mode == "eod" and len(movers) and not args.dry_run and state.get("eod_sent") != today.isoformat():
         summary = ["<b>US close — large idiosyncratic moves</b>"]
         for _, r in movers.iterrows():
             summary.append(f"{html.escape(r['symbol'])} {r['ret']*100:+.1f}% "
                            f"(idio {r['idio_z']:+.1f}σ, {html.escape(r['etf'])} {r['sector_ret']*100:+.1f}%)")
         send_telegram("\n".join(summary))
+        state["eod_sent"] = today.isoformat()
+        EQUITY_STATE_PATH.write_text(json.dumps(state))
 
     if not args.dry_run:
         append_log(records)
