@@ -70,7 +70,11 @@ FEEDS = {
 }
 FINNHUB_CATEGORIES = ("general", "forex", "crypto", "merger")
 # Public Telegram channels read via their web preview (t.me/s/<name>).
-TELEGRAM_CHANNELS = {"FinancialJuice": "financialjuice"}
+TELEGRAM_CHANNELS = {
+    "FinancialJuice": "financialjuice",
+    "Walter Bloomberg": "WalterBloomberg",   # unofficial Bloomberg-headline squawk
+    "Tree News": "TreeNewsFeed",             # crypto + macro squawk
+}
 UA = {"User-Agent": "Mozilla/5.0 (move-alerts news reader)"}
 
 
