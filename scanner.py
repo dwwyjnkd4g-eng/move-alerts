@@ -745,7 +745,10 @@ move's catalyst and context make it better or worse than that base rate: e.g. a 
 or fraud news invalidates a fade even with a good base rate; a no-news sympathy move strengthens it. \
 Use the setup features (RSI2, distance from moving averages in sigma, 52w position, where it sits in \
 today's range, move since the open) as supporting evidence. Say plainly in quant_view whether you'd \
-take the plan as given, adjust it (tighter stop, shorter hold, smaller size), or reject it.
+take the plan as given, adjust it (tighter stop, shorter hold, smaller size), or reject it. The plan's \
+hold and exit date already account for scheduled events (earnings, FOMC, elections, holidays, expiries) \
+and costs; flag anything in the news that the calendar can't see (e.g. a pending ruling, an investor day, \
+a takeover deadline) and how the market regime should change your confidence.
 - Leveraged/inverse ETFs (instrument field present): judge the move by its UNDERLYING (stock, \
 index or sector named in the fund name) — the ETF should move ~leverage x the underlying, so the \
 catalyst is the underlying's. Note for a fade: daily-reset decay and path dependence make holding \
@@ -1029,7 +1032,7 @@ def us_base_rates() -> dict:
         syms = list(uni["yf_symbol"])
         daily = cached_daily(syms + sorted(set(uni["etf"]) | {MARKET_ETF}))
         return daily["close"], daily["open"], daily["volume"], dict(zip(uni["yf_symbol"], uni["etf"])), MIN_DOLLAR_VOL
-    return quant.base_rates_cached("us", loader)
+    return quant.base_rates_cached("us", loader, market=MARKET_ETF)
 
 
 # --------------------------------------------------------------------------

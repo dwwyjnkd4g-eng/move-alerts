@@ -169,7 +169,7 @@ def eu_base_rates() -> dict:
         daily = S.cached_daily(list(uni["yf_symbol"]) + benches, name="eu", tz=LONDON)
         # liquidity is already screened; GBp prices make a $ floor misleading here
         return daily["close"], daily["open"], daily["volume"], dict(zip(uni["yf_symbol"], uni["bench"])), 0.0
-    return quant.base_rates_cached("eu", loader)
+    return quant.base_rates_cached("eu", loader, market="^STOXX50E")
 
 
 def session(now: datetime) -> str | None:
