@@ -221,7 +221,7 @@ def main() -> int:
         except Exception as ex:
             print(f"  explain failed: {ex}", file=sys.stderr)
             a = {"catalyst_type": "other", "catalyst_summary": "Explanation unavailable.", "evidence_ids": [],
-                 "move_nature": "unclear", "verdict": "unclear", "rationale": "Model call failed.",
+                 "move_nature": "unclear", "verdict": "unclear", "rationale": f"Model call failed ({type(ex).__name__}: {str(ex)[:160]}).",
                  "what_would_change_view": "-", "confidence": "low"}
         text = S.format_alert(row, row["name"], a, allnews, "intraday" if mode == "live" else "eod")
         text = text.replace(" [live]", " [Europe · live]").replace(" [close]", " [Europe · close]")

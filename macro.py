@@ -511,7 +511,7 @@ def main() -> int:
             print(f"explain failed: {ex}", file=sys.stderr)
             a = {"catalyst_type": "other", "catalyst_summary": "Explanation unavailable.",
                  "evidence_ids": [], "cross_asset_confirmation": "-", "move_nature": "unclear",
-                 "verdict": "unclear", "rationale": "Model call failed; check headlines.",
+                 "verdict": "unclear", "rationale": f"Model call failed ({type(ex).__name__}: {str(ex)[:160]}).",
                  "what_would_change_view": "-", "confidence": "low"}
         text = format_alert(name, st, a, heads, weekend)
         if args.dry_run:

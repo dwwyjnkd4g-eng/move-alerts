@@ -50,9 +50,10 @@ WHITELIST_PATH = HERE / "revolut_whitelist.txt"   # optional: one ticker per lin
 
 MIN_IDIO_Z = 3.0          # idiosyncratic move, in residual-vol sigmas
 MIN_ABS_RET = 0.03        # and at least a 3% raw move
+BIG_MOVE = 0.08           # ...or ANY move this large (e.g. -8%) counts on its own, whatever the sigma
 MIN_PRICE = 5.0
 MIN_DOLLAR_VOL = 10e6     # 20d avg $ volume (liquidity floor for the wide universe)
-MAX_ALERTS_PER_RUN = 10
+MAX_ALERTS_PER_RUN = 15
 BETA_WINDOW = 120         # days for beta to sector ETF
 RESID_WINDOW = 60         # days for residual vol
 VOL_WINDOW = 20           # days for raw vol / avg volume
@@ -417,14 +418,15 @@ def _lev_mask(m: pd.DataFrame) -> pd.Series:
 
 
 def select_movers(m: pd.DataFrame) -> pd.DataFrame:
-    big = ((m["idio_z"].abs() >= MIN_IDIO_Z) & (m["ret"].abs() >= MIN_ABS_RET)) | _lev_mask(m)
+    big = (((m["idio_z"].abs() >= MIN_IDIO_Z) & (m["ret"].abs() >= MIN_ABS_RET))
+           | (m["ret"].abs() >= BIG_MOVE) | _lev_mask(m))
     f = m[
         big
         & (m["price"] >= MIN_PRICE)
         & (m["adv_usd"] >= MIN_DOLLAR_VOL)
     ].copy()
-    f["abs_idio_z"] = f["idio_z"].abs()
-    return f.sort_values("abs_idio_z", ascending=False).head(MAX_ALERTS_PER_RUN)
+    f["rank"] = f["idio_z"].abs() + 50 * f["ret"].abs()
+    return f.sort_values("rank", ascending=False).head(MAX_ALERTS_PER_RUN)
 
 
 # --------------------------------------------------------------------------
@@ -533,15 +535,16 @@ def select_extended(m: pd.DataFrame, adv: pd.Series) -> pd.DataFrame:
         return m
     m = m.copy()
     m["adv_usd"] = m["yf_symbol"].map(adv)
-    big = ((m["idio_z"].abs() >= MIN_IDIO_Z) & (m["ret"].abs() >= MIN_ABS_RET)) | _lev_mask(m)
+    big = (((m["idio_z"].abs() >= MIN_IDIO_Z) & (m["ret"].abs() >= MIN_ABS_RET))
+           | (m["ret"].abs() >= BIG_MOVE) | _lev_mask(m))
     f = m[
         big
         & (m["price"] >= MIN_PRICE)
         & (m["adv_usd"] >= MIN_DOLLAR_VOL)
         & (m["ext_dollar_vol"] >= MIN_EXT_DOLLAR_VOL)
     ].copy()
-    f["abs_idio_z"] = f["idio_z"].abs()
-    return f.sort_values("abs_idio_z", ascending=False).head(MAX_ALERTS_PER_RUN)
+    f["rank"] = f["idio_z"].abs() + 50 * f["ret"].abs()
+    return f.sort_values("rank", ascending=False).head(MAX_ALERTS_PER_RUN)
 
 
 # --------------------------------------------------------------------------
@@ -1041,7 +1044,7 @@ def main() -> int:
             print(f"  explain failed for {sym}: {ex}", file=sys.stderr)
             a = {"catalyst_type": "other", "catalyst_summary": "Explanation unavailable.",
                  "evidence_ids": [], "move_nature": "unclear", "verdict": "unclear",
-                 "rationale": "Model call failed; check headlines manually.",
+                 "rationale": f"Model call failed ({type(ex).__name__}: {str(ex)[:160]}); check headlines manually.",
                  "what_would_change_view": "-", "confidence": "low"}
         text = format_alert(row, row["name"], a, news, mode)
         if args.dry_run:
