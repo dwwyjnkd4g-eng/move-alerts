@@ -72,6 +72,10 @@ FDB_EXCHANGES = {"LSE": ".L", "PAR": ".PA", "GER": ".DE", "AMS": ".AS", "BRU": "
                  "MCE": ".MC", "EBS": ".SW", "STO": ".ST", "CPH": ".CO", "HEL": ".HE", "OSL": ".OL",
                  "LIS": ".LS", "VIE": ".VI", "ISE": ".IR"}
 FDB_CAPS = {"Mega Cap", "Large Cap", "Mid Cap", "Small Cap"}
+EUROPE_COUNTRIES = {"United Kingdom", "France", "Germany", "Netherlands", "Belgium", "Italy", "Spain",
+                    "Switzerland", "Sweden", "Denmark", "Finland", "Norway", "Portugal", "Austria", "Ireland",
+                    "Luxembourg", "Jersey", "Guernsey", "Isle of Man", "Bermuda", "Greece", "Poland", "Iceland",
+                    "Czech Republic", "Hungary", "Malta", "Cyprus", "Monaco", "Faroe Islands", "Gibraltar"}
 LIQUID_CACHE = HERE / "cache" / "eu_liquid.csv"
 
 
@@ -80,8 +84,11 @@ def all_european_listings() -> pd.DataFrame:
     for x, suffix in FDB_EXCHANGES.items():
         try:
             df = pd.read_csv(io.StringIO(S._fetch(FDB.format(x=x))), dtype=str, keep_default_na=False,
-                             usecols=lambda c: c in ("symbol", "name", "market_cap", "delisted"))
+                             usecols=lambda c: c in ("symbol", "name", "market_cap", "delisted", "country"))
             df = df[df["symbol"].str.endswith(suffix) & df["market_cap"].isin(FDB_CAPS)]
+            if "country" in df:   # drop cross-listings of US/Asian companies (e.g. META.VI, 0XXX.L)
+                df = df[df["country"].isin(EUROPE_COUNTRIES)]
+            df = df[~df["symbol"].str.match(r"^\d")]
             if "delisted" in df:
                 df = df[df["delisted"].str.lower() != "true"]
             for _, r in df.iterrows():
@@ -247,7 +254,11 @@ def main() -> int:
         return 0
 
     vol_scale = session_fraction(now) if mode == "live" else 1.0
-    m = S.compute_metrics(px["close"], px["open"], px["volume"], dict(zip(uni["yf_symbol"], uni["bench"])), vol_scale)
+    have = set(c for c in px["close"].columns if px["close"][c].notna().any())
+    fallback = "^STOXX50E" if "^STOXX50E" in have else None
+    bench = {s: (b if b in have else fallback) for s, b in zip(uni["yf_symbol"], uni["bench"])}
+    bench = {s: b for s, b in bench.items() if b}
+    m = S.compute_metrics(px["close"], px["open"], px["volume"], bench, vol_scale)
     if m.empty:
         return 0
     m = m.merge(uni[["yf_symbol", "name"]], on="yf_symbol")

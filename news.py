@@ -55,11 +55,8 @@ FEEDS = {
     "MarketWatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
     "MarketWatch Pulse": "https://feeds.content.dowjones.io/public/rss/mw_marketpulse",
     "WSJ Markets": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-    "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
     "Investing.com": "https://www.investing.com/rss/news.rss",
-    "FXStreet": "https://www.fxstreet.com/rss/news",
     "CoinDesk": "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "Mining.com": "https://www.mining.com/feed/",
     "Federal Reserve": "https://www.federalreserve.gov/feeds/press_all.xml",
     "ECB": "https://www.ecb.europa.eu/rss/press.html",
     "Bank of England": "https://www.bankofengland.co.uk/rss/news",
@@ -68,6 +65,7 @@ FEEDS = {
     "Google News: metals/USD/BTC": gnews('(gold OR silver OR platinum OR "US dollar" OR yuan OR bitcoin) when:2h'),
     "Google News: Reuters/Bloomberg": gnews('(site:reuters.com OR site:bloomberg.com) markets when:2h'),
     "Google News: ags/freight": gnews('(wheat OR corn OR soybeans OR cocoa OR coffee OR "Baltic Dry" OR "freight rates" OR tanker rates) when:2h'),
+    "Google News: metals/mining": gnews('(gold OR silver OR copper OR lithium OR uranium) (mine OR mining OR miner) when:2h'),
     "Google News: Europe stocks": gnews('(FTSE OR DAX OR "European shares" OR "Stoxx 600") when:2h'),
 }
 FINNHUB_CATEGORIES = ("general", "forex", "crypto", "merger")

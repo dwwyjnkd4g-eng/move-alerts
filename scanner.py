@@ -259,27 +259,59 @@ def yf_chunked(syms: list[str], fields: tuple[str, ...], **kw) -> dict[str, pd.D
 
     parts: dict[str, list[pd.DataFrame]] = {f.lower(): [] for f in fields}
     syms = list(dict.fromkeys(syms))
-    for i in range(0, len(syms), CHUNK):
-        chunk = syms[i:i + CHUNK]
+    big = len(syms) > CHUNK
+
+    def fetch(chunk: list[str]):
         for attempt in range(3):
             try:
-                raw = yf.download(chunk, group_by="column", threads=True, progress=False, **kw)
-                break
+                return yf.download(chunk, group_by="column", threads=4 if big else True, progress=False, **kw)
             except Exception as e:
                 print(f"  download retry ({e})", file=sys.stderr)
-                _time.sleep(5 * (attempt + 1))
-        else:
+                _time.sleep(10 * (attempt + 1))
+        return None
+
+    def missing(raw, chunk: list[str]) -> list[str]:
+        if raw is None or "Close" not in raw:
+            return list(chunk)
+        c = raw["Close"]
+        if isinstance(c, pd.Series):
+            c = c.to_frame(chunk[0])
+        return [s for s in chunk if s not in c.columns or c[s].isna().all()]
+
+    for i in range(0, len(syms), CHUNK):
+        chunk = syms[i:i + CHUNK]
+        raw = fetch(chunk)
+        miss = missing(raw, chunk)
+        # Yahoo rate-limits large bursts: if a big share of the chunk came back empty, wait and retry those
+        if miss and (len(miss) >= max(2, 0.1 * len(chunk)) or any(m.startswith("^") for m in miss)):
+            print(f"  {len(miss)} of {len(chunk)} empty (likely rate limit) — pausing and retrying", file=sys.stderr)
+            _time.sleep(45)
+            raw2 = fetch(miss)
+            if raw2 is not None:
+                for f in fields:
+                    if f in raw2:
+                        x = raw2[f]
+                        if isinstance(x, pd.Series):
+                            x = x.to_frame(miss[0])
+                        parts[f.lower()].append(x.dropna(axis=1, how="all"))
+        if raw is not None:
+            for f in fields:
+                if f not in raw:
+                    continue
+                x = raw[f]
+                if isinstance(x, pd.Series):
+                    x = x.to_frame(chunk[0])
+                parts[f.lower()].append(x.dropna(axis=1, how="all"))
+        if big:
+            _time.sleep(4)
+    out = {}
+    for k, v in parts.items():
+        if not v:
+            out[k] = pd.DataFrame()
             continue
-        for f in fields:
-            if f not in raw:
-                continue
-            x = raw[f]
-            if isinstance(x, pd.Series):
-                x = x.to_frame(chunk[0])
-            parts[f.lower()].append(x)
-        if len(syms) > CHUNK:
-            _time.sleep(1)
-    return {k: (pd.concat(v, axis=1).sort_index() if v else pd.DataFrame()) for k, v in parts.items()}
+        df = pd.concat(v, axis=1).sort_index()
+        out[k] = df.T.groupby(level=0).first().T     # merge duplicate columns from retries
+    return out
 
 
 def cached_daily(yf_symbols: list[str], name: str = "us", tz=None) -> dict[str, pd.DataFrame]:
@@ -294,15 +326,33 @@ def cached_daily(yf_symbols: list[str], name: str = "us", tz=None) -> dict[str, 
             data = None
     except Exception:
         data = None
+    def _clean(f: pd.DataFrame) -> pd.DataFrame:
+        if f.empty:
+            return f
+        f.index = pd.to_datetime(f.index).tz_localize(None) if getattr(f.index, "tz", None) else pd.to_datetime(f.index)
+        return f[f.index.date < today]
+
     if data is None:
         print(f"  refreshing daily history for {len(yf_symbols)} symbols…")
         got = yf_chunked(yf_symbols, ("Open", "Close", "Volume"), period="1y", interval="1d", auto_adjust=True)
-        data = {"asof": today, "requested": list(yf_symbols)}
+        data = {"asof": today, "requested": list(yf_symbols), "topup": datetime.now(timezone.utc).timestamp()}
         for k, f in got.items():
-            f.index = pd.to_datetime(f.index).tz_localize(None) if getattr(f.index, "tz", None) else pd.to_datetime(f.index)
-            data[k] = f[f.index.date < today]
+            data[k] = _clean(f)
         path.parent.mkdir(exist_ok=True)
         pd.to_pickle(data, path)
+    else:
+        have = set(data["close"].columns) if not data["close"].empty else set()
+        gaps = [s for s in yf_symbols if s not in have]
+        if gaps and datetime.now(timezone.utc).timestamp() - data.get("topup", 0) > 1800:
+            print(f"  topping up daily history for {len(gaps)} symbols that failed earlier…")
+            got = yf_chunked(gaps, ("Open", "Close", "Volume"), period="1y", interval="1d", auto_adjust=True)
+            for k, f in got.items():
+                f = _clean(f)
+                if not f.empty:
+                    data[k] = pd.concat([data[k], f], axis=1).sort_index()
+                    data[k] = data[k].T.groupby(level=0).first().T
+            data["topup"] = datetime.now(timezone.utc).timestamp()
+            pd.to_pickle(data, path)
     return {k: data[k] for k in ("open", "close", "volume")}
 
 
