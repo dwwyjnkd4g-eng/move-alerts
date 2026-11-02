@@ -63,7 +63,10 @@ def _run(name: str, args: list[str]) -> None:
         p = subprocess.run([PY, str(HERE / script), *args[1:]], cwd=HERE, capture_output=True, text=True,
                            timeout=TIMEOUTS.get(name, TIMEOUTS.get(script, 300)))
         ok = p.returncode == 0
-        tail = (p.stdout + p.stderr).strip().splitlines()[-2:]
+        noise = ("Warning", "warn(", "See https://pandas", "inplace=True", "FutureWarning", "DeprecationWarning")
+        lines = [l for l in (p.stdout + p.stderr).strip().splitlines() if l.strip() and not any(n in l for n in noise)]
+        key = [l for l in lines if any(k in l for k in ("Flagged", "failed", "Error", "error", "Traceback", "liquid US", "universe:"))]
+        tail = (key[-3:] if key else lines[-2:])
         print(f"{datetime.now(LONDON):%d %b %H:%M:%S} {name} {'ok' if ok else 'FAIL'} "
               f"{time.time()-t0:.0f}s | " + " / ".join(tail), flush=True)
     except subprocess.TimeoutExpired:
