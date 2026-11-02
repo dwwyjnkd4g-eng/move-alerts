@@ -300,18 +300,22 @@ def triage(cands: list[dict]) -> list[dict]:
         f"[{i}] {c['ts'].astimezone(LONDON):%H:%M} | {', '.join(c['sources'][:3])} | {c['headline']}"
         for i, c in enumerate(cands, 1)
     )
-    msg = anthropic.Anthropic().messages.create(
-        model=NEWS_MODEL, max_tokens=2000, system=TRIAGE_PROMPT, tools=[TRIAGE_TOOL],
-        tool_choice={"type": "tool", "name": "record_selection"},
-        messages=[{"role": "user", "content": f"HEADLINES\n{listing}\n\nCall record_selection."}],
-    )
-    for b in msg.content:
-        if b.type == "tool_use":
-            stories = b.input.get("stories", [])
-            for s in stories:
-                s["ids"] = [i for i in s.get("ids", []) if isinstance(i, int) and 1 <= i <= len(cands)]
-            return [s for s in stories if s["ids"]]
-    return []
+    from llm import tool_call
+    out = tool_call(NEWS_MODEL, TRIAGE_TOOL, [{"role": "user", "content": f"HEADLINES\n{listing}\n\nCall record_selection."}],
+                    system=TRIAGE_PROMPT, max_tokens=2000)
+    stories = out.get("stories", []) or []
+    good = []
+    for s in stories:
+        try:
+            s["ids"] = [int(i) for i in s.get("ids", []) if 1 <= int(i) <= len(cands)]
+            s["importance"] = int(s.get("importance", 2))
+        except (TypeError, ValueError):
+            continue
+        s.setdefault("why", "")
+        s.setdefault("assets", [])
+        if s["ids"] and s.get("headline"):
+            good.append(s)
+    return good
 
 
 def format_digest(stories: list[dict], cands: list[dict], now: datetime) -> str:

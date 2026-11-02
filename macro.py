@@ -395,18 +395,10 @@ def explain(name: str, st: dict, snapshot: dict, heads: list[dict]) -> dict:
         f"HEADLINES (last {HEADLINE_HOURS}h, newest first)\n{headlines_block(heads)}\n\n"
         "Assess this move and call record_assessment."
     )
-    msg = anthropic.Anthropic().messages.create(
-        model=CLAUDE_MODEL, max_tokens=1200, system=SYSTEM_PROMPT, tools=[TOOL],
-        tool_choice={"type": "tool", "name": "record_assessment"},
-        messages=[{"role": "user", "content": prompt}],
-    )
-    for b in msg.content:
-        if b.type == "tool_use":
-            a = dict(b.input)
-            a["evidence_ids"] = [i for i in a.get("evidence_ids", [])
-                                 if isinstance(i, int) and 1 <= i <= len(heads)]
-            return a
-    raise RuntimeError("no assessment")
+    from llm import tool_call
+    from scanner import sanitize_assessment
+    a = tool_call(CLAUDE_MODEL, TOOL, [{"role": "user", "content": prompt}], system=SYSTEM_PROMPT)
+    return sanitize_assessment(a, len(heads))
 
 
 def fmt_price(p: float) -> str:

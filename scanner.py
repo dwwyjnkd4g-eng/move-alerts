@@ -135,7 +135,7 @@ def find_table(html_text: str, min_rows: int = 20) -> pd.DataFrame | None:
             name = next((cols[c] for c in cols if c in ("security", "company", "name", "company name")
                          or c.startswith("company")), None)
             sector = next((cols[c] for c in cols if "sector" in c or "industry" in c), None)
-            out = pd.DataFrame({"symbol": t[sym].astype(str).str.strip(),
+            out = pd.DataFrame({"symbol": t[sym].astype(str).str.split(":").str[-1].str.strip(),
                                 "name": t[name].astype(str) if name is not None else t[sym].astype(str),
                                 "sector": t[sector].astype(str) if sector is not None else ""})
             return out[out["symbol"].str.len().between(1, 12)]
@@ -762,26 +762,28 @@ def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dic
 
 
 def explain(prompt: str, n_news: int) -> dict:
-    import anthropic
+    from llm import tool_call
+    a = tool_call(CLAUDE_MODEL, EXPLAIN_TOOL, [{"role": "user", "content": prompt}], system=SYSTEM_PROMPT)
+    return sanitize_assessment(a, n_news)
 
-    client = anthropic.Anthropic()
-    msg = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1200,
-        system=SYSTEM_PROMPT,
-        tools=[EXPLAIN_TOOL],
-        tool_choice={"type": "tool", "name": "record_assessment"},
-        messages=[{"role": "user", "content": prompt}],
-    )
-    for block in msg.content:
-        if block.type == "tool_use":
-            return sanitize_assessment(dict(block.input), n_news)
-    raise RuntimeError("Claude returned no assessment")
+
+ASSESS_DEFAULTS = {"catalyst_type": "other", "catalyst_summary": "", "evidence_ids": [], "move_nature": "unclear",
+                   "verdict": "unclear", "rationale": "", "what_would_change_view": "-", "confidence": "low",
+                   "cross_asset_confirmation": "-"}
 
 
 def sanitize_assessment(a: dict, n_news: int) -> dict:
-    """Drop citations that point at news items that don't exist."""
-    a["evidence_ids"] = [i for i in a.get("evidence_ids", []) if isinstance(i, int) and 1 <= i <= n_news]
+    """Fill any missing fields and drop citations that point at news items that don't exist."""
+    a = {**ASSESS_DEFAULTS, **{k: v for k, v in a.items() if v is not None}}
+    ids = []
+    for i in a.get("evidence_ids") or []:
+        try:
+            i = int(i)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= i <= n_news:
+            ids.append(i)
+    a["evidence_ids"] = ids
     return a
 
 

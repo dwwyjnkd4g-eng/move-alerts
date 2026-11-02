@@ -275,14 +275,10 @@ def explain_holding(t: str, name: str, s: dict, heads: list[dict]) -> dict | Non
               f"{math.log1p(s['move'])/s['vol']:+.1f} sigma of daily vol\n\n"
               f"HEADLINES\n{headlines_block(heads)}\n\nCall record.")
     try:
-        msg = anthropic.Anthropic().messages.create(
-            model=CLAUDE_MODEL, max_tokens=800, system=HOLDING_PROMPT, tools=[HOLDING_TOOL],
-            tool_choice={"type": "tool", "name": "record"}, messages=[{"role": "user", "content": prompt}])
-        for b in msg.content:
-            if b.type == "tool_use":
-                a = dict(b.input)
-                a["evidence_ids"] = [i for i in a.get("evidence_ids", []) if isinstance(i, int) and 1 <= i <= len(heads)]
-                return a
+        from llm import tool_call
+        a = tool_call(CLAUDE_MODEL, HOLDING_TOOL, [{"role": "user", "content": prompt}], system=HOLDING_PROMPT, max_tokens=800)
+        a["evidence_ids"] = [i for i in a.get("evidence_ids", []) if isinstance(i, int) and 1 <= i <= len(heads)]
+        return a
     except Exception as e:
         print(f"  holding explain failed: {e}", file=sys.stderr)
     return None

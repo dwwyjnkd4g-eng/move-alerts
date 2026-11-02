@@ -47,10 +47,11 @@ EU_LISTS = [
 ]
 SUFFIX_INDEX = {".L": "^FTSE", ".DE": "^GDAXI", ".PA": "^FCHI", ".AS": "^AEX", ".MC": "^IBEX",
                 ".MI": "FTSEMIB.MI", ".SW": "^SSMI", ".ST": "^OMX", ".BR": "^BFX", ".HE": "^OMXH25",
-                ".CO": "^OMXC25", ".IR": "^STOXX50E", ".LS": "^STOXX50E", ".VI": "^ATX"}
+                ".CO": "^OMXC25", ".IR": "^STOXX50E", ".LS": "^STOXX50E", ".VI": "^ATX", ".OL": "^STOXX50E"}
 # rough FX to USD for the liquidity floor only (GBp = pence)
 TO_USD = {".L": 1.30 / 100, ".DE": 1.08, ".PA": 1.08, ".AS": 1.08, ".MC": 1.08, ".MI": 1.08,
-          ".BR": 1.08, ".HE": 1.08, ".IR": 1.08, ".LS": 1.08, ".VI": 1.08, ".SW": 1.13, ".ST": 0.095, ".CO": 0.145}
+          ".BR": 1.08, ".HE": 1.08, ".IR": 1.08, ".LS": 1.08, ".VI": 1.08, ".SW": 1.13, ".ST": 0.095, ".CO": 0.145,
+          ".OL": 0.093}
 MIN_DOLLAR_VOL = 5e6
 SESSION = ((8, 15), (16, 30))     # UK time, live scanning
 CLOSE_WINDOW = ((16, 30), (17, 0))
@@ -65,7 +66,43 @@ def to_yahoo(sym: str, suffix: str) -> str:
     return sym + suffix
 
 
-def load_universe() -> pd.DataFrame:
+# Every listed company on Europe's main exchanges (FinanceDatabase, free, per-exchange files)
+FDB = "https://raw.githubusercontent.com/JerBouma/FinanceDatabase/main/database/equities/{x}.csv"
+FDB_EXCHANGES = {"LSE": ".L", "PAR": ".PA", "GER": ".DE", "AMS": ".AS", "BRU": ".BR", "MIL": ".MI",
+                 "MCE": ".MC", "EBS": ".SW", "STO": ".ST", "CPH": ".CO", "HEL": ".HE", "OSL": ".OL",
+                 "LIS": ".LS", "VIE": ".VI", "ISE": ".IR"}
+FDB_CAPS = {"Mega Cap", "Large Cap", "Mid Cap", "Small Cap"}
+LIQUID_CACHE = HERE / "cache" / "eu_liquid.csv"
+
+
+def all_european_listings() -> pd.DataFrame:
+    rows = []
+    for x, suffix in FDB_EXCHANGES.items():
+        try:
+            df = pd.read_csv(io.StringIO(S._fetch(FDB.format(x=x))), dtype=str, keep_default_na=False,
+                             usecols=lambda c: c in ("symbol", "name", "market_cap", "delisted"))
+            df = df[df["symbol"].str.endswith(suffix) & df["market_cap"].isin(FDB_CAPS)]
+            if "delisted" in df:
+                df = df[df["delisted"].str.lower() != "true"]
+            for _, r in df.iterrows():
+                rows.append({"yf_symbol": r["symbol"].strip(), "name": r["name"].strip(),
+                             "bench": SUFFIX_INDEX.get(suffix, "^STOXX50E")})
+            print(f"  {x}: {len(df)}")
+        except Exception as e:
+            print(f"  {x} listings failed: {e}", file=sys.stderr)
+    return pd.DataFrame(rows)
+
+
+def load_universe(liquid_only: bool = True) -> pd.DataFrame:
+    """Every listed small/mid/large cap on the main European exchanges + index lists, then
+    (by default) a daily liquidity screen."""
+    if liquid_only:
+        try:
+            if LIQUID_CACHE.exists() and datetime.now().timestamp() - LIQUID_CACHE.stat().st_mtime < 86400:
+                return pd.read_csv(LIQUID_CACHE, keep_default_na=False)
+        except Exception:
+            pass
+        return refresh_liquid()
     try:
         if UNIVERSE_CACHE.exists() and datetime.now().timestamp() - UNIVERSE_CACHE.stat().st_mtime < 86400:
             return pd.read_csv(UNIVERSE_CACHE, keep_default_na=False)
@@ -85,12 +122,35 @@ def load_universe() -> pd.DataFrame:
             print(f"  {url.rsplit('/', 1)[-1]}: {len(t)}")
         except Exception as e:
             print(f"  {url.rsplit('/', 1)[-1]} failed: {e}", file=sys.stderr)
-    if not rows:
+    frames = [pd.DataFrame(rows)] if rows else []
+    try:
+        listed = all_european_listings()
+        if len(listed):
+            frames.append(listed)       # index lists first, so their home-index benchmark wins
+    except Exception as e:
+        print(f"  European listings failed: {e}", file=sys.stderr)
+    if not frames:
         raise RuntimeError("no European lists loaded")
-    df = pd.DataFrame(rows).drop_duplicates("yf_symbol")
+    df = pd.concat(frames).drop_duplicates("yf_symbol")
     UNIVERSE_CACHE.parent.mkdir(exist_ok=True)
     df.to_csv(UNIVERSE_CACHE, index=False)
     return df
+
+
+def refresh_liquid() -> pd.DataFrame:
+    """Download a year of daily data for every listed European stock (slow, once a day) and keep liquid ones."""
+    full = load_universe(liquid_only=False)
+    benches = sorted(set(full["bench"]))
+    daily = S.cached_daily(list(full["yf_symbol"]) + benches, name="eu", tz=LONDON)
+    dv = (daily["close"] * daily["volume"]).iloc[-S.VOL_WINDOW:].mean()
+    fx = pd.Series({s: TO_USD.get("." + s.rsplit(".", 1)[-1], 1.0) for s in dv.index})
+    dv_usd = dv * fx.reindex(dv.index).fillna(1.0)
+    ok = set(dv_usd[dv_usd >= MIN_DOLLAR_VOL].index)
+    liq = full[full["yf_symbol"].isin(ok)].reset_index(drop=True)
+    LIQUID_CACHE.parent.mkdir(exist_ok=True)
+    liq.to_csv(LIQUID_CACHE, index=False)
+    print(f"  liquid European universe: {len(liq)} of {len(full)} listed stocks")
+    return liq
 
 
 def session(now: datetime) -> str | None:
@@ -161,6 +221,7 @@ def main() -> int:
         lock.write_text("x")
         try:
             UNIVERSE_CACHE.unlink(missing_ok=True)
+            LIQUID_CACHE.unlink(missing_ok=True)
             uni = load_universe()
             S.cached_daily(list(uni["yf_symbol"]) + sorted(set(uni["bench"])), name="eu", tz=LONDON)
             print(f"European universe: {len(uni)} stocks")

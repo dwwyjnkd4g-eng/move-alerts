@@ -288,14 +288,8 @@ def claude_brief(levels_txt: str, cal: list[str], heads: list[dict]) -> dict | N
         f"\n\nHEADLINES (newest first)\n{headlines_block(heads)}\n\nCall record_brief."
     )
     try:
-        msg = anthropic.Anthropic().messages.create(
-            model=CLAUDE_MODEL, max_tokens=1500, tools=[BRIEF_TOOL],
-            tool_choice={"type": "tool", "name": "record_brief"},
-            messages=[{"role": "user", "content": prompt}],
-        )
-        for b in msg.content:
-            if b.type == "tool_use":
-                return dict(b.input)
+        from llm import tool_call
+        return tool_call(CLAUDE_MODEL, BRIEF_TOOL, [{"role": "user", "content": prompt}], max_tokens=1500)
     except Exception as e:
         print(f"brief failed: {e}", file=sys.stderr)
     return None
