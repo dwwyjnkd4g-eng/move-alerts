@@ -359,6 +359,9 @@ silver vs gold, BTC vs risk)? A move that is NOT confirmed elsewhere is more lik
 geopolitical escalation) tend to persist; FLOW moves (stop runs, thin weekend/Asia liquidity, \
 options/expiry, liquidations, no news) are better fade candidates.
 - Be decisive but calibrated; "unclear" is allowed.
+- QUANT PLAN (if present) is the statistical prior from this market's own recent history of similar \
+moves. Judge whether the catalyst and cross-asset picture make this move better or worse than that \
+prior, and say in quant_view whether you'd take, adjust or reject the plan (target, stop, hold).
 """
 
 TOOL = {
@@ -379,6 +382,7 @@ TOOL = {
             "rationale": {"type": "string"},
             "what_would_change_view": {"type": "string"},
             "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+            "quant_view": {"type": "string", "description": "Take / adjust / reject the quant plan, and why."},
         },
         "required": ["catalyst_type", "catalyst_summary", "evidence_ids", "cross_asset_confirmation",
                      "move_nature", "verdict", "rationale", "what_would_change_view", "confidence"],
@@ -386,12 +390,14 @@ TOOL = {
 }
 
 
-def explain(name: str, st: dict, snapshot: dict, heads: list[dict]) -> dict:
+def explain(name: str, st: dict, snapshot: dict, heads: list[dict], plan: dict | None = None) -> dict:
     import anthropic
 
     prompt = (
         f"FLAGGED MOVE\n{json.dumps({'instrument': name, 'window': st['window'], 'move_pct': round(st['ret']*100, 2), 'sigmas': round(st['z'], 1), 'change_24h_pct': round(st['chg_24h']*100, 2), 'price': st['price']}, indent=1)}\n\n"
         f"RELATED MARKETS (24h % change, latest)\n{json.dumps(snapshot, indent=1)}\n\n"
+        + (f"QUANT PLAN (from this market's own last ~60 days of similar moves)\n"
+           f"{json.dumps(__import__('quant').plan_for_prompt(plan), indent=1, default=str)}\n\n" if plan else "") +
         f"HEADLINES (last {HEADLINE_HOURS}h, newest first)\n{headlines_block(heads)}\n\n"
         "Assess this move and call record_assessment."
     )
@@ -412,19 +418,24 @@ def fmt_price(p: float) -> str:
 VERDICT = {"fade_candidate": "FADE CANDIDATE", "do_not_fade": "DON'T FADE", "unclear": "UNCLEAR"}
 
 
-def format_alert(name: str, st: dict, a: dict, heads: list[dict], weekend: bool) -> str:
+def format_alert(name: str, st: dict, a: dict, heads: list[dict], weekend: bool, plan: dict | None = None) -> str:
     e = html.escape
     arrow = "🔺" if st["ret"] > 0 else "🔻"
     lines = [
         f"{arrow} <b>{e(name)}</b> {st['ret']*100:+.2f}% in {st['window']} ({st['z']:+.1f}σ) · "
         f"24h {st['chg_24h']*100:+.2f}% · last {fmt_price(st['price'])}" + (" · weekend" if weekend else ""),
+    ]
+    if plan:
+        import quant
+        lines += [""] + quant.plan_lines(plan)
+    lines += [
         "",
         f"<b>Catalyst:</b> {e(a['catalyst_type'].replace('_', ' '))} — {e(a['catalyst_summary'])}",
         f"<b>Cross-asset:</b> {e(a['cross_asset_confirmation'])}",
         f"<b>Nature:</b> {e(a['move_nature'])} → <b>{VERDICT.get(a['verdict'], a['verdict'])}</b> ({e(a['confidence'])})",
         f"<b>Why:</b> {e(a['rationale'])}",
         f"<b>Changes view:</b> {e(a['what_would_change_view'])}",
-    ]
+    ] + ([f"<b>On the quant plan:</b> {e(a['quant_view'])}"] if a.get("quant_view") else [])
     if a["evidence_ids"]:
         lines.append("")
         for i in a["evidence_ids"][:4]:
@@ -497,15 +508,21 @@ def main() -> int:
             continue
         if heads is None:
             heads = get_headlines(HEADLINE_HOURS)
+        plan = None
         try:
-            a = explain(name, st, snapshot, heads)
+            import quant
+            plan = quant.macro_plan(sym_of[name][0], sym_of[name][1], st)
+        except Exception as ex:
+            print(f"macro plan failed: {ex}", file=sys.stderr)
+        try:
+            a = explain(name, st, snapshot, heads, plan)
         except Exception as ex:
             print(f"explain failed: {ex}", file=sys.stderr)
             a = {"catalyst_type": "other", "catalyst_summary": "Explanation unavailable.",
                  "evidence_ids": [], "cross_asset_confirmation": "-", "move_nature": "unclear",
                  "verdict": "unclear", "rationale": f"Model call failed ({type(ex).__name__}: {str(ex)[:160]}).",
                  "what_would_change_view": "-", "confidence": "low"}
-        text = format_alert(name, st, a, heads, weekend)
+        text = format_alert(name, st, a, heads, weekend, plan)
         if args.dry_run:
             print(text + "\n" + "-" * 60)
         else:

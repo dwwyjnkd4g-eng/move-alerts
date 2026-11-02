@@ -738,6 +738,14 @@ barely priced the news.
 - Pre-market / after-hours moves: liquidity is thin and prices can overshoot, but these sessions \
 are also when earnings and major news land, so an extended-hours move WITH a clear catalyst is \
 usually information. Here the benchmark is S&P 500 futures, not a sector ETF.
+- QUANT PLAN (if present) is a statistical prior from an event study: what similar moves (same \
+direction, size in sigma, volume, gap type) across the whole market over the past year — and in this \
+stock's own 5-year history — did next. Treat it as the base rate. Your job is to judge whether THIS \
+move's catalyst and context make it better or worse than that base rate: e.g. a guidance cut, M&A \
+or fraud news invalidates a fade even with a good base rate; a no-news sympathy move strengthens it. \
+Use the setup features (RSI2, distance from moving averages in sigma, 52w position, where it sits in \
+today's range, move since the open) as supporting evidence. Say plainly in quant_view whether you'd \
+take the plan as given, adjust it (tighter stop, shorter hold, smaller size), or reject it.
 - Leveraged/inverse ETFs (instrument field present): judge the move by its UNDERLYING (stock, \
 index or sector named in the fund name) — the ETF should move ~leverage x the underlying, so the \
 catalyst is the underlying's. Note for a fade: daily-reset decay and path dependence make holding \
@@ -762,6 +770,8 @@ EXPLAIN_TOOL = {
             "rationale": {"type": "string", "description": "2-4 sentences on why the move does or doesn't make sense."},
             "what_would_change_view": {"type": "string", "description": "One sentence."},
             "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+            "quant_view": {"type": "string", "description": "One or two sentences: take / adjust / reject the "
+                           "quant plan (target, stop, hold) given the catalyst, and why."},
         },
         "required": ["catalyst_type", "catalyst_summary", "evidence_ids", "move_nature",
                      "verdict", "rationale", "what_would_change_view", "confidence"],
@@ -773,7 +783,8 @@ def is_leveraged(name: str) -> bool:
     return bool(LEV_RE.search(str(name))) and bool(re.search(r"(etf|fund|shares|trust)", str(name), re.I))
 
 
-def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dict], mode: str) -> str:
+def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dict], mode: str,
+                 plan: dict | None = None) -> str:
     def r(x, k=100, d=2):
         return None if pd.isna(x) else round(float(x) * k, d)
 
@@ -803,8 +814,12 @@ def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dic
         for i, n in enumerate(news, 1)
     ) or "(no news items returned)"
     earn_txt = json.dumps(earnings, default=str) if earnings else "(no earnings within +/-7 days)"
+    quant_txt = ""
+    if plan:
+        import quant
+        quant_txt = f"QUANT PLAN\n{json.dumps(quant.plan_for_prompt(plan), indent=1, default=str)}\n\n"
     return (
-        f"MOVE STATS\n{json.dumps(stats, indent=1)}\n\n"
+        f"MOVE STATS\n{json.dumps(stats, indent=1)}\n\n{quant_txt}"
         f"NEWS (last {NEWS_LOOKBACK_DAYS} days, newest first)\n{news_txt}\n\n"
         f"EARNINGS CALENDAR\n{earn_txt}\n\n"
         "Assess this move and call record_assessment."
@@ -846,7 +861,7 @@ AS_OF = {"intraday": "live intraday", "eod": "official close",
          "pre": "pre-market, vs prior regular close", "post": "after-hours, vs today's regular close"}
 
 
-def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str) -> str:
+def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str, plan: dict | None = None) -> str:
     e = html.escape
     arrow = "🔺" if row["ret"] > 0 else "🔻"
     tag = TAG.get(mode, mode)
@@ -867,6 +882,9 @@ def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str
     if not pd.isna(row.get("earn_ratio", np.nan)):
         lines.append(f"Earnings: move is <b>{row['earn_ratio']:.1f}×</b> its typical reaction "
                      f"(avg ±{row['earn_avg']*100:.1f}% over last {int(row['earn_n'])})")
+    if plan:
+        import quant
+        lines += [""] + quant.plan_lines(plan)
     lines += [
         "",
         f"<b>Catalyst:</b> {e(a['catalyst_type'].replace('_', ' '))} — {e(a['catalyst_summary'])}",
@@ -874,6 +892,7 @@ def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str
         f"({e(a['confidence'])})",
         f"<b>Why:</b> {e(a['rationale'])}",
         f"<b>Changes view:</b> {e(a['what_would_change_view'])}",
+    ] + ([f"<b>On the quant plan:</b> {e(a['quant_view'])}"] if a.get("quant_view") else []) + [
     ]
     if a["evidence_ids"]:
         lines.append("")
@@ -961,7 +980,8 @@ def split_message(text: str, limit: int = 3800) -> list[str]:
 # --------------------------------------------------------------------------
 LOG_COLS = ["run_ts_utc", "date", "mode", "symbol", "price", "ret", "z", "idio_z", "beta",
             "etf", "sector_ret", "rvol", "gap", "ret_5d_prior", "catalyst_type", "move_nature",
-            "verdict", "confidence", "catalyst_summary"]
+            "verdict", "confidence", "catalyst_summary",
+            "plan_side", "plan_target", "plan_stop", "plan_hold", "plan_score"]
 
 
 SESSION_GROUP = {"intraday": "regular", "eod": "regular", "pre": "pre", "post": "post"}
@@ -984,8 +1004,32 @@ def load_log() -> pd.DataFrame:
 def append_log(records: list[dict]) -> None:
     if not records:
         return
-    df = pd.DataFrame(records)[LOG_COLS]
+    df = pd.DataFrame(records).reindex(columns=LOG_COLS)
+    if LOG_PATH.exists():
+        old = pd.read_csv(LOG_PATH)
+        if list(old.columns) != LOG_COLS:          # upgrade an older log to the new columns
+            old.reindex(columns=LOG_COLS).to_csv(LOG_PATH, index=False)
     df.to_csv(LOG_PATH, mode="a", header=not LOG_PATH.exists(), index=False)
+
+
+def plan_fields(plan: dict | None) -> dict:
+    if not plan or not plan.get("edge"):
+        return {"plan_side": "none" if plan else None, "plan_target": None, "plan_stop": None,
+                "plan_hold": None, "plan_score": None}
+    return {"plan_side": plan["side"], "plan_target": plan["target"], "plan_stop": plan["stop"],
+            "plan_hold": plan["hold"], "plan_score": plan["score"]}
+
+
+def us_base_rates() -> dict:
+    """Universe event-study base rates for US stocks (built once a day from the daily cache)."""
+    import quant
+
+    def loader():
+        uni = load_universe()
+        syms = list(uni["yf_symbol"])
+        daily = cached_daily(syms + sorted(set(uni["etf"]) | {MARKET_ETF}))
+        return daily["close"], daily["open"], daily["volume"], dict(zip(uni["yf_symbol"], uni["etf"])), MIN_DOLLAR_VOL
+    return quant.base_rates_cached("us", loader)
 
 
 # --------------------------------------------------------------------------
@@ -1016,6 +1060,7 @@ def main() -> int:
                 p.unlink(missing_ok=True)
             liq = refresh_liquid()
             cached_daily(list(liq["yf_symbol"]) + sorted(set(liq["etf"]) | {MARKET_ETF}))
+            us_base_rates()
         finally:
             lock.unlink(missing_ok=True)
         return 0
@@ -1082,6 +1127,7 @@ def main() -> int:
     print(f"Flagged {len(movers)} ({len(new_movers)} new).")
 
     records = []
+    base = us_base_rates() if len(new_movers) else {}
     for _, row in new_movers.iterrows():
         sym = row["symbol"]
         news = get_news(sym, today)
@@ -1090,15 +1136,21 @@ def main() -> int:
             g = earnings_gauge(row["yf_symbol"], closes[row["yf_symbol"]], row["ret"])
             if g and g["ratio"] is not None:
                 row["earn_ratio"], row["earn_avg"], row["earn_n"] = g["ratio"], g["avg_abs"], g["n"]
+        plan = None
         try:
-            a = explain(build_prompt(row, row["name"], news, earnings, mode), len(news))
+            import quant
+            plan = quant.equity_plan(row, closes, base)
+        except Exception as ex:
+            print(f"  quant plan failed for {sym}: {ex}", file=sys.stderr)
+        try:
+            a = explain(build_prompt(row, row["name"], news, earnings, mode, plan), len(news))
         except Exception as ex:  # keep going; still alert the raw move
             print(f"  explain failed for {sym}: {ex}", file=sys.stderr)
             a = {"catalyst_type": "other", "catalyst_summary": "Explanation unavailable.",
                  "evidence_ids": [], "move_nature": "unclear", "verdict": "unclear",
                  "rationale": f"Model call failed ({type(ex).__name__}: {str(ex)[:160]}); check headlines manually.",
                  "what_would_change_view": "-", "confidence": "low"}
-        text = format_alert(row, row["name"], a, news, mode)
+        text = format_alert(row, row["name"], a, news, mode, plan)
         if args.dry_run:
             print("\n" + text + "\n" + "-" * 60)
         else:
@@ -1110,6 +1162,7 @@ def main() -> int:
                                    "sector_ret", "rvol", "gap", "ret_5d_prior"]},
             **{k: a[k] for k in ["catalyst_type", "move_nature", "verdict",
                                  "confidence", "catalyst_summary"]},
+            **plan_fields(plan),
         })
 
     state = load_equity_state()

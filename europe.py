@@ -160,6 +160,18 @@ def refresh_liquid() -> pd.DataFrame:
     return liq
 
 
+def eu_base_rates() -> dict:
+    import quant
+
+    def loader():
+        uni = load_universe()
+        benches = sorted(set(uni["bench"]))
+        daily = S.cached_daily(list(uni["yf_symbol"]) + benches, name="eu", tz=LONDON)
+        # liquidity is already screened; GBp prices make a $ floor misleading here
+        return daily["close"], daily["open"], daily["volume"], dict(zip(uni["yf_symbol"], uni["bench"])), 0.0
+    return quant.base_rates_cached("eu", loader)
+
+
 def session(now: datetime) -> str | None:
     if now.weekday() >= 5:
         return None
@@ -231,6 +243,7 @@ def main() -> int:
             LIQUID_CACHE.unlink(missing_ok=True)
             uni = load_universe()
             S.cached_daily(list(uni["yf_symbol"]) + sorted(set(uni["bench"])), name="eu", tz=LONDON)
+            eu_base_rates()
             print(f"European universe: {len(uni)} stocks")
         finally:
             lock.unlink(missing_ok=True)
@@ -281,21 +294,28 @@ def main() -> int:
     from macro import get_headlines
     macro_heads = None
     records = []
+    base = eu_base_rates() if len(new) else {}
     for _, row in new.iterrows():
         news = company_news(str(row["name"]))
+        plan = None
+        try:
+            import quant
+            plan = quant.equity_plan(row, px["close"], base)
+        except Exception as ex:
+            print(f"  quant plan failed for {row['symbol']}: {ex}", file=sys.stderr)
         if macro_heads is None:
             macro_heads = [{"headline": h["headline"], "summary": "", "source": h["source"], "url": h["url"],
                             "time_et": h["ts"].astimezone(LONDON).strftime("%a %d %b %H:%M UK")}
                            for h in get_headlines(hours=8, limit=15)]
         allnews = news + macro_heads
         try:
-            a = S.explain(S.build_prompt(row, row["name"], allnews, [], "intraday" if mode == "live" else "eod"), len(allnews))
+            a = S.explain(S.build_prompt(row, row["name"], allnews, [], "intraday" if mode == "live" else "eod", plan), len(allnews))
         except Exception as ex:
             print(f"  explain failed: {ex}", file=sys.stderr)
             a = {"catalyst_type": "other", "catalyst_summary": "Explanation unavailable.", "evidence_ids": [],
                  "move_nature": "unclear", "verdict": "unclear", "rationale": f"Model call failed ({type(ex).__name__}: {str(ex)[:160]}).",
                  "what_would_change_view": "-", "confidence": "low"}
-        text = S.format_alert(row, row["name"], a, allnews, "intraday" if mode == "live" else "eod")
+        text = S.format_alert(row, row["name"], a, allnews, "intraday" if mode == "live" else "eod", plan)
         text = text.replace(" [live]", " [Europe · live]").replace(" [close]", " [Europe · close]")
         print(text) if args.dry_run else S.send_telegram(text)
         records.append({
@@ -303,6 +323,7 @@ def main() -> int:
             "mode": "eu", "symbol": row["symbol"],
             **{k: row[k] for k in ["price", "ret", "z", "idio_z", "beta", "etf", "sector_ret", "rvol", "gap", "ret_5d_prior"]},
             **{k: a[k] for k in ["catalyst_type", "move_nature", "verdict", "confidence", "catalyst_summary"]},
+            **S.plan_fields(plan),
         })
     if not args.dry_run:
         S.append_log(records)
