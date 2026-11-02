@@ -25,17 +25,17 @@ HERE = Path(__file__).resolve().parent
 STATE = HERE / "divergence_state.json"
 
 PAIRS = [  # label, asset, driver
-    ("Gold vs USD (DXY)", "GC=F", "DX-Y.NYB"),
-    ("Gold vs US 10y note futures", "GC=F", "ZN=F"),
-    ("Silver vs Gold", "SI=F", "GC=F"),
-    ("Platinum vs Gold", "PL=F", "GC=F"),
+    ("XAU vs USD (DXY)", "GC=F", "DX-Y.NYB"),
+    ("XAU vs US 10y note futures", "GC=F", "ZN=F"),
+    ("XAG vs XAU", "SI=F", "GC=F"),
+    ("XPT vs XAU", "PL=F", "GC=F"),
     ("Bitcoin vs Nasdaq futures", "BTC-USD", "NQ=F"),
     ("USDJPY vs US 10y note futures", "JPY=X", "ZN=F"),
     ("AUDUSD vs Copper", "AUDUSD=X", "HG=F"),
     ("USDCAD vs WTI crude", "CAD=X", "CL=F"),
     ("Nasdaq vs S&P futures", "NQ=F", "ES=F"),
 ]
-NAMES = {"GC=F": "Gold", "SI=F": "Silver", "PL=F": "Platinum", "DX-Y.NYB": "DXY", "ZN=F": "10y note fut",
+NAMES = {"GC=F": "XAU", "SI=F": "XAG", "PL=F": "XPT", "DX-Y.NYB": "DXY", "ZN=F": "10y note fut",
          "BTC-USD": "Bitcoin", "NQ=F": "Nasdaq fut", "ES=F": "S&P fut", "JPY=X": "USDJPY",
          "AUDUSD=X": "AUDUSD", "HG=F": "Copper", "CAD=X": "USDCAD", "CL=F": "WTI"}
 Z_MIN, CORR_MIN, MIN_RESID = 2.5, 0.3, 0.004

@@ -31,7 +31,9 @@ HERE = Path(__file__).resolve().parent
 LONDON = ZoneInfo("Europe/London")
 STATUS = HERE / "runner_status.json"
 PY = sys.executable
-TIMEOUTS = {"scanner.py": 1800, "scanner-refresh": 3600, "weekly.py": 1800, "cot.py": 600}
+TIMEOUTS = {"scanner.py": 1800, "scanner-refresh": 3600, "europe.py": 1800, "europe-refresh": 2400,
+            "weekly.py": 1800, "cot.py": 600, "macro.py": 600, "snapshot.py": 600, "divergence.py": 600,
+            "holdings.py": 600, "daily.py": 900}
 
 _running: set[str] = set()
 _lock = threading.Lock()
@@ -109,6 +111,9 @@ def main() -> None:
         if (now.hour, now.minute) >= (7, 30) and last.get("refresh") != now.date():
             last["refresh"] = now.date()      # whole-US-market universe + history, before US pre-market
             launch("scanner-refresh", "scanner.py", "--refresh")
+        if (now.hour, now.minute) >= (6, 45) and last.get("eu-refresh") != now.date():
+            last["eu-refresh"] = now.date()   # UK/Europe universe + history, before London opens
+            launch("europe-refresh", "europe.py", "--refresh")
         if now.hour == 7 and last.get("daily") != now.date():
             last["daily"] = now.date()
             launch("daily.py", "daily.py", "--force")

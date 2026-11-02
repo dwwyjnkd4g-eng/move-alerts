@@ -41,11 +41,12 @@ LONDON = __import__("zoneinfo").ZoneInfo("Europe/London")
 INSTRUMENTS = [
     # Crypto (24/7)
     ("Bitcoin", "kraken", "XBTUSD", 0.025),
-    # Precious metals (CME, ~23/5)
-    ("Gold", "yf", "GC=F", 0.008),
-    ("Silver", "yf", "SI=F", 0.015),
-    ("Platinum", "yf", "PL=F", 0.015),
-    ("Palladium", "yf", "PA=F", 0.020),
+    # Precious metals — OTC spot (live Swissquote quote; intraday history from COMEX/NYMEX
+    # futures, basis-adjusted to the spot level). 23/5.
+    ("Gold (XAU/USD)", "otc", "XAU", 0.008),
+    ("Silver (XAG/USD)", "otc", "XAG", 0.015),
+    ("Platinum (XPT/USD)", "otc", "XPT", 0.015),
+    ("Palladium (XPD/USD)", "otc", "XPD", 0.020),
     # USD / FX (24/5)
     ("DXY (USD index)", "yf", "DX-Y.NYB", 0.003),
     ("EURUSD", "yf", "EURUSD=X", 0.003),
@@ -92,11 +93,17 @@ INSTRUMENTS = [
     ("Cotton", "yf", "CT=F", 0.020),
     ("Live cattle", "yf", "LE=F", 0.015),
     ("Lean hogs", "yf", "HE=F", 0.025),
-    # Freight & battery/nuclear metals (ETF proxies, US hours only)
-    ("Dry bulk freight (BDRY)", "yf", "BDRY", 0.035),
-    ("Tanker freight (BWET)", "yf", "BWET", 0.040),
-    ("Uranium (URA)", "yf", "URA", 0.025),
-    ("Lithium & battery (LIT)", "yf", "LIT", 0.025),
+    # Freight & battery/nuclear metals.
+    # US ETFs track freight futures / the sector (incl. US pre-market & after-hours prints)...
+    ("Dry bulk freight (BDRY)", "yf_prepost", "BDRY", 0.035),
+    ("Tanker freight (BWET)", "yf_prepost", "BWET", 0.040),
+    ("Uranium (URA)", "yf_prepost", "URA", 0.025),
+    ("Lithium & battery (LIT)", "yf_prepost", "LIT", 0.025),
+    # ...plus proxies that trade in UK/European and Asian hours
+    ("Dry bulk shippers (Oslo)", "basket", "HSHP.OL+BELCO.OL+2020.OL", 0.025),
+    ("Tanker shippers (Oslo)", "basket", "FRO.OL+HAFNI.OL+OET.OL", 0.025),
+    ("Uranium (Yellow Cake, London)", "yf", "YCA.L", 0.025),
+    ("Lithium miners (ASX)", "basket", "PLS.AX+MIN.AX+LTR.AX", 0.035),
 ]
 # Weekend / out-of-hours gold proxy: only used when gold futures are closed.
 PAXG = ("Gold (PAXG token, 24/7 proxy)", "kraken", "PAXGUSD", 0.008)
@@ -126,10 +133,10 @@ def kraken_closes(pair: str, interval: int = 15) -> pd.Series:
     return pd.Series([float(x[4]) for x in rows], index=idx).sort_index()
 
 
-def yf_closes(symbols: list[str]) -> dict[str, pd.Series]:
+def yf_closes(symbols: list[str], prepost: bool = False) -> dict[str, pd.Series]:
     import yfinance as yf
 
-    raw = yf.download(symbols, period="5d", interval="15m", progress=False, auto_adjust=False)
+    raw = yf.download(symbols, period="5d", interval="15m", progress=False, auto_adjust=False, prepost=prepost)
     close = raw["Close"]
     if isinstance(close, pd.Series):
         close = close.to_frame(symbols[0])
@@ -143,13 +150,79 @@ def yf_closes(symbols: list[str]) -> dict[str, pd.Series]:
     return out
 
 
+OTC_FUT = {"XAU": "GC=F", "XAG": "SI=F", "XPT": "PL=F", "XPD": "PA=F"}
+OTC_BASIS: dict[str, float] = {}     # spot / futures ratio at the last load
+SQ_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/{m}/USD"
+
+
+def otc_spot(metal: str) -> tuple[float, datetime] | None:
+    """Live OTC spot mid (and quote time) for XAU/XAG/XPT/XPD from Swissquote's public feed."""
+    try:
+        r = requests.get(SQ_URL.format(m=metal), headers={"User-Agent": "Mozilla/5.0 (move-alerts)"}, timeout=10)
+        r.raise_for_status()
+        js = r.json()
+        js = js[0] if isinstance(js, list) else js
+        p = js["spreadProfilePrices"][0]
+        return (float(p["bid"]) + float(p["ask"])) / 2, datetime.fromtimestamp(js["ts"] / 1000, timezone.utc)
+    except Exception as e:
+        print(f"OTC {metal} quote failed: {e}", file=sys.stderr)
+        return None
+
+
+def spot_series(metal: str, fut: pd.Series | None) -> pd.Series | None:
+    """15-min history at the spot level: futures bars scaled by today's spot/futures basis,
+    with the live spot quote as the last point."""
+    q = otc_spot(metal)
+    if fut is None or fut.empty:
+        return None
+    if q is None:
+        return fut
+    spot, ts = q
+    ratio = spot / float(fut.iloc[-1])
+    OTC_BASIS[metal] = ratio
+    s = fut * ratio
+    if ts > s.index[-1]:
+        s.loc[pd.Timestamp(ts)] = spot
+    return s.sort_index()
+
+
+def basket(parts: dict[str, pd.Series]) -> pd.Series | None:
+    """Equal-weight index (start = 100) of several price series, on their common 15-min bars."""
+    df = pd.concat(parts, axis=1).sort_index().ffill().dropna()
+    if df.empty:
+        return None
+    return (df / df.iloc[0]).mean(axis=1) * 100
+
+
 def load_all_series() -> dict[str, pd.Series]:
-    yf_syms = [i[2] for i in INSTRUMENTS if i[1] == "yf"]
+    yf_syms = [i[2] for i in INSTRUMENTS if i[1] == "yf"] + list(OTC_FUT.values())
+    pre_syms = [i[2] for i in INSTRUMENTS if i[1] == "yf_prepost"]
+    bsk = {i[2]: i[2].split("+") for i in INSTRUMENTS if i[1] == "basket"}
     series: dict[str, pd.Series] = {}
     try:
         series.update(yf_closes(yf_syms))
     except Exception as e:
         print(f"yfinance failed: {e}", file=sys.stderr)
+    try:   # US-listed ETF proxies: include pre-market and after-hours prints
+        if pre_syms:
+            series.update(yf_closes(pre_syms, prepost=True))
+    except Exception as e:
+        print(f"yfinance prepost failed: {e}", file=sys.stderr)
+    try:   # baskets of local-hours proxies (e.g. Oslo shipping stocks)
+        comps = sorted({c for cs in bsk.values() for c in cs})
+        if comps:
+            got = yf_closes(comps)
+            for key, cs in bsk.items():
+                b = basket({c: got[c] for c in cs if c in got})
+                if b is not None:
+                    series[key] = b
+    except Exception as e:
+        print(f"basket failed: {e}", file=sys.stderr)
+    for name, src, sym, _ in INSTRUMENTS:
+        if src == "otc":
+            s = spot_series(sym, series.get(OTC_FUT[sym]))
+            if s is not None:
+                series[sym] = s
     for name, src, sym, _ in INSTRUMENTS + [PAXG]:
         if src == "kraken":
             try:
@@ -380,8 +453,11 @@ MACRO_LOG_COLS = ["run_ts_utc", "date", "instrument", "source", "symbol", "price
 
 
 def log_alert(now: datetime, name: str, src_sym: tuple, st: dict, a: dict) -> None:
+    src, sym, price = src_sym[0], src_sym[1], st["price"]
+    if src == "otc":   # store as the futures equivalent so follow-ups can price it from futures history
+        src, sym, price = "yf", OTC_FUT[sym], price / OTC_BASIS.get(sym, 1.0)
     row = {"run_ts_utc": now.isoformat(timespec="seconds"), "date": now.date().isoformat(),
-           "instrument": name, "source": src_sym[0], "symbol": src_sym[1], "price": st["price"],
+           "instrument": name, "source": src, "symbol": sym, "price": price,
            "ret": st["ret"], "z": st["z"], "window": st["window"],
            **{k: a.get(k) for k in ["catalyst_type", "move_nature", "verdict", "confidence"]}}
     pd.DataFrame([row])[MACRO_LOG_COLS].to_csv(MACRO_LOG, mode="a", header=not MACRO_LOG.exists(), index=False)

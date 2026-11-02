@@ -30,8 +30,8 @@ FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 HEADSUP_MIN = (7, 13)      # send the heads-up when the event is this many minutes away
 RESULT_MIN = (5, 25)       # send the result in this window after the release
-REACTION = [("DXY", "DX-Y.NYB"), ("EURUSD", "EURUSD=X"), ("USDJPY", "JPY=X"), ("Gold", "GC=F"),
-            ("Silver", "SI=F"), ("S&P fut", "ES=F"), ("US 10y note fut", "ZN=F"), ("Bitcoin", "BTC-USD")]
+REACTION = [("DXY", "DX-Y.NYB"), ("EURUSD", "EURUSD=X"), ("USDJPY", "JPY=X"), ("XAU", "GC=F"),
+            ("XAG", "SI=F"), ("S&P fut", "ES=F"), ("US 10y note fut", "ZN=F"), ("Bitcoin", "BTC-USD")]
 COUNTRY_WORDS = {"USD": ["us", "u.s.", "united states", "fed", "fomc"], "EUR": ["eurozone", "euro", "ecb", "german", "germany"],
                  "GBP": ["uk", "u.k.", "british", "boe"], "JPY": ["japan", "japanese", "boj"],
                  "CNY": ["china", "chinese", "pboc"], "CAD": ["canada", "canadian", "boc"],

@@ -74,7 +74,9 @@ def earnings_by_day(start, end) -> dict[str, list[str]]:
 def macro_week_moves(top: int = 10) -> list[str]:
     import yfinance as yf
     from macro import INSTRUMENTS, kraken_closes
-    yf_syms = {sym: name for name, src, sym, _ in INSTRUMENTS if src == "yf"}
+    from macro import OTC_FUT
+    yf_syms = {sym: name for name, src, sym, _ in INSTRUMENTS if src in ("yf", "yf_prepost")}
+    yf_syms.update({OTC_FUT[sym]: name for name, src, sym, _ in INSTRUMENTS if src == "otc"})
     px = yf.download(list(yf_syms), period="3mo", interval="1d", auto_adjust=False, progress=False)["Close"]
     rows = []
     for sym, name in yf_syms.items():

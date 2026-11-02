@@ -34,12 +34,11 @@ LEVELS = [  # label, source, symbol, decimals
     ("DXY", "yf", "DX-Y.NYB", 2),
     ("EURUSD", "yf", "EURUSD=X", 4),
     ("USDJPY", "yf", "JPY=X", 2),
-    ("Gold", "yf", "GC=F", 1),
-    ("Silver", "yf", "SI=F", 2),
-    ("Platinum", "yf", "PL=F", 1),
-    ("Palladium", "yf", "PA=F", 1),
+    ("XAU/USD", "otc", "XAU", 1),
+    ("XAG/USD", "otc", "XAG", 2),
+    ("XPT/USD", "otc", "XPT", 1),
+    ("XPD/USD", "otc", "XPD", 1),
     ("Bitcoin", "kraken", "XBTUSD", 0),
-    ("PAXG (24/7 gold)", "kraken", "PAXGUSD", 1),
     ("S&P fut", "yf", "ES=F", 1),
     ("Nasdaq fut", "yf", "NQ=F", 1),
     ("FTSE 100", "yf", "^FTSE", 1),
@@ -120,7 +119,8 @@ def levels(now: datetime) -> list[str]:
     import yfinance as yf
 
     lines = []
-    yf_syms = [s for _, src, s, _ in LEVELS if src == "yf"]
+    from macro import OTC_FUT, otc_spot
+    yf_syms = [s for _, src, s, _ in LEVELS if src == "yf"] + [OTC_FUT[s] for _, src, s, _ in LEVELS if src == "otc"]
     try:
         d = yf.download(yf_syms, period="7d", interval="1d", progress=False, auto_adjust=False)["Close"]
     except Exception as e:
@@ -132,6 +132,12 @@ def levels(now: datetime) -> list[str]:
                 s = d[sym].dropna()
                 last, prev = s.iloc[-1], s.iloc[-2]
                 tag = f"{s.index[-1]:%a}"
+            elif src == "otc":   # live OTC spot; daily % change from the futures (same move, no basis)
+                s = d[OTC_FUT[sym]].dropna()
+                q = otc_spot(sym)
+                last = q[0] if q else s.iloc[-1]
+                prev = last / (s.iloc[-1] / s.iloc[-2])
+                tag = "spot"
             else:
                 s = kraken_closes(sym, interval=60)
                 last = s.iloc[-1]

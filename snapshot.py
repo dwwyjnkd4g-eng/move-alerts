@@ -26,20 +26,26 @@ MIN_LIVE = 5
 
 GROUPS = [
     ("USD & FX", ["DXY (USD index)", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "USDCNH", "USDMXN"]),
-    ("Precious metals", ["Gold", "Gold (PAXG token, 24/7 proxy)", "Silver", "Platinum", "Palladium"]),
+    ("Precious metals (OTC spot)", ["Gold (XAU/USD)", "Gold (PAXG token, 24/7 proxy)", "Silver (XAG/USD)",
+                                    "Platinum (XPT/USD)", "Palladium (XPD/USD)"]),
     ("Crypto", ["Bitcoin"]),
     ("Index futures", ["S&P 500 futures", "Nasdaq 100 futures", "Russell 2000 futures", "Dow futures", "Nikkei futures (CME)"]),
     ("Global indices & vol", ["FTSE 100", "DAX", "Euro Stoxx 50", "Hang Seng", "Shanghai Composite", "VIX"]),
     ("Rates", ["US 10y note futures", "US 10y yield"]),
     ("Energy & metals", ["WTI crude", "Brent crude", "Natural gas", "Heating oil", "RBOB gasoline", "Dutch TTF gas", "Copper", "Aluminium"]),
     ("Ags & livestock", ["Wheat", "Corn", "Soybeans", "Coffee", "Cocoa", "Sugar", "Cotton", "Live cattle", "Lean hogs"]),
-    ("Freight, uranium, lithium", ["Dry bulk freight (BDRY)", "Tanker freight (BWET)", "Uranium (URA)", "Lithium & battery (LIT)"]),
+    ("Freight, uranium, lithium", ["Dry bulk freight (BDRY)", "Dry bulk shippers (Oslo)", "Tanker freight (BWET)",
+                                   "Tanker shippers (Oslo)", "Uranium (URA)", "Uranium (Yellow Cake, London)",
+                                   "Lithium & battery (LIT)", "Lithium miners (ASX)"]),
 ]
-SHORT = {"DXY (USD index)": "DXY", "Gold (PAXG token, 24/7 proxy)": "Gold (PAXG)", "S&P 500 futures": "S&P fut",
+SHORT = {"DXY (USD index)": "DXY", "Gold (XAU/USD)": "XAU", "Silver (XAG/USD)": "XAG", "Platinum (XPT/USD)": "XPT",
+         "Palladium (XPD/USD)": "XPD", "Gold (PAXG token, 24/7 proxy)": "Gold (PAXG)", "S&P 500 futures": "S&P fut",
          "Nasdaq 100 futures": "Nasdaq fut", "Russell 2000 futures": "Russell fut", "Dow futures": "Dow fut",
          "Nikkei futures (CME)": "Nikkei fut", "Shanghai Composite": "Shanghai", "US 10y note futures": "10y note fut",
          "US 10y yield": "10y yield %", "Dry bulk freight (BDRY)": "BDRY dry bulk", "Tanker freight (BWET)": "BWET tankers",
-         "Uranium (URA)": "URA uranium", "Lithium & battery (LIT)": "LIT lithium", "Euro Stoxx 50": "Stoxx 50",
+         "Uranium (URA)": "URA uranium", "Lithium & battery (LIT)": "LIT lithium",
+         "Dry bulk shippers (Oslo)": "Bulk shippers", "Tanker shippers (Oslo)": "Tanker shpprs",
+         "Uranium (Yellow Cake, London)": "Yellow Cake", "Lithium miners (ASX)": "Li miners ASX", "Euro Stoxx 50": "Stoxx 50",
          "Live cattle": "Cattle", "Lean hogs": "Hogs", "RBOB gasoline": "Gasoline", "Dutch TTF gas": "TTF gas",
          "Natural gas": "Nat gas", "Heating oil": "Heating oil"}
 
@@ -86,8 +92,8 @@ def collect() -> dict[str, dict]:
         vol30 = float(lr.std() * math.sqrt(2)) if len(lr) > 50 else float("nan")
         out[name] = {"last": last, "chg30": chg30, "chg24": chg24, "live": live,
                      "z30": chg30 / vol30 if vol30 and not math.isnan(vol30) and live else 0.0}
-    # PAXG only matters when gold futures are shut
-    if out.get("Gold", {}).get("live"):
+    # PAXG only matters when the OTC gold market is shut (weekends)
+    if out.get("Gold (XAU/USD)", {}).get("live"):
         out.pop("Gold (PAXG token, 24/7 proxy)", None)
     return out
 
@@ -145,7 +151,7 @@ def build_message(force: bool = False) -> str | None:
         return None
     e = html.escape
     lines = [f"📊 <b>Markets</b> · {now:%a %H:%M} UK · {n_live} live",
-             "<i>last · 30m · 24h   ⚡ = unusual 30-min move</i>", ""]
+             "<i>last · 30m · 24h   ⚡ = unusual 30-min move · metals = OTC spot</i>", ""]
     bullets = summary(data)
     if bullets:
         lines += [e(b) for b in bullets] + [""]

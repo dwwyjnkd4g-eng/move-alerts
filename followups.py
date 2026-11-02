@@ -39,7 +39,7 @@ def load_alerts() -> pd.DataFrame:
         d = pd.read_csv(mc)
         frames.append(pd.DataFrame({
             "id": "mc:" + d["run_ts_utc"].astype(str) + ":" + d["symbol"].astype(str),
-            "kind": "macro", "label": d["instrument"], "source": d["source"], "symbol": d["symbol"],
+            "kind": "macro", "label": d["instrument"], "source": d["source"].replace("yf_prepost", "yf"), "symbol": d["symbol"],
             "date": d["date"], "price": d["price"], "ret": d["ret"],
             "verdict": d["verdict"], "nature": d["move_nature"], "catalyst": d["catalyst_type"]}))
     if not frames:

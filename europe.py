@@ -153,7 +153,23 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["auto", "live", "close"], default="auto")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--refresh", action="store_true", help="rebuild universe + daily history cache only")
     args = ap.parse_args()
+    lock = HERE / "cache" / "eu_refresh.lock"
+    if args.refresh:
+        lock.parent.mkdir(exist_ok=True)
+        lock.write_text("x")
+        try:
+            UNIVERSE_CACHE.unlink(missing_ok=True)
+            uni = load_universe()
+            S.cached_daily(list(uni["yf_symbol"]) + sorted(set(uni["bench"])), name="eu", tz=LONDON)
+            print(f"European universe: {len(uni)} stocks")
+        finally:
+            lock.unlink(missing_ok=True)
+        return 0
+    if lock.exists() and datetime.now().timestamp() - lock.stat().st_mtime < 2400:
+        print("European refresh in progress — skipping this scan.")
+        return 0
 
     now = datetime.now(LONDON)
     mode = args.mode if args.mode != "auto" else session(now)
