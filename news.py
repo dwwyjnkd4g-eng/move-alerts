@@ -67,6 +67,8 @@ FEEDS = {
     "Google News: macro": gnews('(Fed OR ECB OR "Bank of Japan" OR Treasury OR inflation OR tariffs OR sanctions) when:2h'),
     "Google News: metals/USD/BTC": gnews('(gold OR silver OR platinum OR "US dollar" OR yuan OR bitcoin) when:2h'),
     "Google News: Reuters/Bloomberg": gnews('(site:reuters.com OR site:bloomberg.com) markets when:2h'),
+    "Google News: ags/freight": gnews('(wheat OR corn OR soybeans OR cocoa OR coffee OR "Baltic Dry" OR "freight rates" OR tanker rates) when:2h'),
+    "Google News: Europe stocks": gnews('(FTSE OR DAX OR "European shares" OR "Stoxx 600") when:2h'),
 }
 FINNHUB_CATEGORIES = ("general", "forex", "crypto", "merger")
 # Public Telegram channels read via their web preview (t.me/s/<name>).
@@ -215,7 +217,8 @@ def dedupe(items: list[dict]) -> list[dict]:
 def fetch_all(since: datetime, verbose: bool = False) -> list[dict]:
     with ThreadPoolExecutor(max_workers=10) as ex:
         results = list(ex.map(lambda kv: fetch_feed(*kv), FEEDS.items()))
-        results += list(ex.map(lambda kv: fetch_tg(*kv), TELEGRAM_CHANNELS.items()))
+        if not os.environ.get("NEWS_SKIP_TELEGRAM"):   # the live listener covers these on the server
+            results += list(ex.map(lambda kv: fetch_tg(*kv), TELEGRAM_CHANNELS.items()))
     items = []
     for name, got, err in results:
         fresh = [x for x in got if x["ts"] >= since]
@@ -246,7 +249,8 @@ def item_id(it: dict) -> str:
 # --------------------------------------------------------------------------
 TRIAGE_PROMPT = """You filter a live news wire for a UK-based trader who trades global macro \
 (USD and FX, rates, equity indices and futures, oil, copper), precious metals (gold, silver, \
-PGMs), bitcoin, and large single-stock moves in US equities including pre-market and after-hours."""
+PGMs), bitcoin, agricultural commodities and freight, and large single-stock moves in US, UK and \
+European equities including US pre-market and after-hours."""
 TRIAGE_PROMPT += """
 
 From the numbered headlines, select only those likely to move those markets or that a macro \
@@ -258,7 +262,7 @@ trader would want to know about now. Score importance:
      finance-ministry comment, geopolitics and conflict (Russia/Ukraine, Middle East, China/Taiwan, \
      shipping lanes, energy infrastructure, sanctions), elections and major political news in \
      big economies, trade and tariff news, commodity supply/demand (oil, gas, metals, mining \
-     strikes), notable company news for large caps, crypto market and regulatory news, \
+     strikes, grains, softs, livestock, weather/crop reports, shipping and freight rates), notable company news for large caps, crypto market and regulatory news, \
      sentiment gauges and positioning data.
 When unsure whether something is a 2, include it.
 Ignore only: opinion pieces, explainers, listicles, personal finance, "stocks to buy", \
@@ -330,7 +334,7 @@ def format_digest(stories: list[dict], cands: list[dict], now: datetime) -> str:
         lines.append(f"{dot} <b>{e(s['headline'])}</b> ({first['ts'].astimezone(LONDON):%H:%M})")
         lines.append(f"   {e(s['why'])} <i>[{e(', '.join(s['assets'][:4]))}]</i>")
         lines.append(f"   {src_txt}")
-    return "\n".join(lines)[:4000]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -357,8 +361,10 @@ def main() -> int:
     state = load_state()
     seen = set(state.get("seen", []))
     items = fetch_all(now - timedelta(minutes=LOOKBACK_MIN), verbose=True)
-    cands = [it for it in items if item_id(it) not in seen][:MAX_CANDIDATES]
-    print(f"{len(items)} recent, {len(cands)} new")
+    import sent_store
+    new = [it for it in items if item_id(it) not in seen]
+    cands = [it for it in new if not sent_store.is_dup(it["headline"])][:MAX_CANDIDATES]
+    print(f"{len(items)} recent, {len(new)} new, {len(cands)} not already sent")
     if not cands:
         return 0
 
@@ -374,6 +380,9 @@ def main() -> int:
     if stories:
         text = format_digest(stories, cands, now)
         print(text) if args.dry_run else send_telegram(text)
+        if not args.dry_run:
+            sent_store.add([s["headline"] for s in stories]
+                           + [cands[i - 1]["headline"] for s in stories for i in s["ids"]])
     if not args.dry_run:
         state["seen"] = (state.get("seen", []) + [item_id(c) for c in cands])[-3000:]
         STATE_PATH.write_text(json.dumps(state))

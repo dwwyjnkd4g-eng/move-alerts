@@ -1,5 +1,16 @@
 # move-alerts
 
+> **Running on an always-on server?** See `SERVER_SETUP.md`. The server adds:
+> - a live squawk listener
+> - exact 15-minute timings
+> - Telegram commands
+> - holdings alerts
+> - data-release alerts
+> - CFTC positioning
+> - cross-asset divergences
+> - fade follow-ups and a scorecard
+> - the Sunday week-ahead
+
 Telegram alerts for large idiosyncratic moves in US large caps, with a Claude-written
 read on *why* the stock moved and whether the move looks fadeable.
 
@@ -39,6 +50,71 @@ alerted at most once per day.
 **Actions minutes:** roughly 25 runs a day at 1–2 minutes each is about 1,000–1,300
 minutes a month. That fits inside the 2,000 free minutes for private repos. To halve
 it, change `*/15` to `*/30` in `.github/workflows/alerts.yml`.
+
+## Macro alerts: USD, metals and bitcoin, 24/7 (`macro.py`)
+
+This runs every hour, every day. It flags 1-hour or 4-hour moves of at least 3σ
+against the instrument's own volatility, provided the move is also above a minimum
+size.
+
+Instruments covered:
+- **USD:** DXY, EURUSD, USDJPY, USDCNH
+- **Metals:** gold, silver, platinum and palladium futures
+- **Bitcoin:** via Kraken
+
+When gold futures are closed, including weekends, it watches **PAXG** on Kraken
+instead. PAXG is a gold-backed token that trades 24/7.
+
+Each alert has two parts:
+- headlines from FinancialJuice and Finnhub
+- a Claude assessment: the catalyst, whether other markets confirm the move,
+  information vs flow, and a fade verdict
+
+A repeat alert on the same instrument within 6 hours only fires if the move
+extends further.
+
+## Breaking news every 30 minutes (`news.py`)
+
+This job runs in the same workflow as the macro alerts.
+
+**Sources** (about 17 feeds plus Finnhub, all listed in `FEEDS`):
+- FinancialJuice
+- CNBC
+- MarketWatch
+- WSJ Markets
+- Yahoo Finance
+- Investing.com
+- FXStreet
+- CoinDesk
+- Mining.com
+- Fed, ECB and Bank of England press releases
+- Google News searches, which surface Reuters, Bloomberg and FT headlines
+
+**How it works:**
+- Duplicate stories are merged across sources.
+- Claude Haiku keeps only market-relevant stories and scores them 🔴 top-tier or 🟠 relevant.
+- You get one digest per run, and only when something qualifies.
+
+**Controls:**
+- Set the repo variable or secret `NEWS_MIN_IMPORTANCE=3` for top-tier only.
+- Run `python news.py --sources` to see which feeds respond.
+
+The move alerts and the daily brief use the same source list.
+
+## Daily brief at 07:00 UK, every day (`daily.py`)
+
+- A hello, plus a health check that reads the last 20 runs of the other two jobs.
+- Levels for USD, metals, BTC, equity futures, US 10-year and Brent.
+- Today's high-impact economic calendar from ForexFactory, in UK time.
+- S&P 500 names reporting earnings today.
+- An overnight summary, the top headlines with links, and what to watch today.
+
+If the brief doesn't arrive one morning, something is broken.
+
+**Actions minutes:** with news every 30 minutes, usage is roughly 2,500–3,000 a month.
+That's more than the 2,000 free minutes for a private repo. Either make the repo
+public, which gives unlimited free minutes and keeps secrets hidden, or use GitHub
+Pro, which allows 3,000 minutes.
 
 ## Setup (about 15 minutes)
 

@@ -19,6 +19,7 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -55,10 +56,40 @@ WORKFLOWS = {"alerts.yml": "Equity alerts", "macro.yml": "Macro alerts"}
 
 
 # --------------------------------------------------------------------------
+RUNNER_STATUS = Path(__file__).resolve().parent / "runner_status.json"
+SERVICES = ("move-alerts-runner", "move-alerts-listener", "move-alerts-bot")
+
+
+def server_health(now: datetime) -> list[str]:
+    """On the always-on server: job results from run_forever.py + systemd service state."""
+    out = []
+    try:
+        st = json.loads(RUNNER_STATUS.read_text())
+    except Exception:
+        return ["⚠️ Runner status missing"]
+    for job, info in sorted(st.items()):
+        last = datetime.fromisoformat(info["last"])
+        fails = info.get("fails_24h", 0)
+        ago = (now - last).total_seconds() / 3600
+        icon = "✅" if fails == 0 else "⚠️"
+        out.append(f"{icon} {job}: last {ago:.1f}h ago · {fails} failed in 24h")
+    try:
+        import subprocess
+        for svc in SERVICES:
+            r = subprocess.run(["systemctl", "is-active", svc], capture_output=True, text=True, timeout=5)
+            state = r.stdout.strip() or "unknown"
+            out.append(f"{'✅' if state == 'active' else '⚠️'} {svc.replace('move-alerts-', '')}: {state}")
+    except Exception:
+        pass
+    return out
+
+
 def health_lines(now: datetime) -> list[str]:
+    if RUNNER_STATUS.exists():
+        return server_health(now)
     token, repo = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
     if not token or not repo:
-        return ["(health check runs on GitHub only)"]
+        return ["(health check unavailable here)"]
     out = []
     for wf, label in WORKFLOWS.items():
         try:
@@ -152,6 +183,72 @@ def earnings_today(today) -> list[str]:
     return rows[:25]
 
 
+METALS_STATE = Path(__file__).resolve().parent / "metals_state.json"
+METAL_ETFS = [("GLD", "Gold"), ("IAU", "Gold"), ("SLV", "Silver")]
+
+
+def metals_lines(now: datetime) -> list[str]:
+    """Gold/silver ratio vs 3y range + approximate ETF flows from changes in shares outstanding."""
+    e = html.escape
+    out = []
+    try:
+        import yfinance as yf
+        from divergence import gold_silver_ratio
+        px = yf.download(["GC=F", "SI=F"], period="3y", interval="1d", auto_adjust=False, progress=False)["Close"]
+        g = gold_silver_ratio(px["GC=F"], px["SI=F"])
+        if g:
+            out.append(f"Gold/silver ratio {g['ratio']:.1f} (3y percentile {g['pctile']*100:.0f})")
+    except Exception as ex:
+        print(f"GSR failed: {ex}", file=sys.stderr)
+    try:
+        import yfinance as yf
+        state = json.loads(METALS_STATE.read_text()) if METALS_STATE.exists() else {}
+        today = now.astimezone(LONDON).date().isoformat()
+        snap = {}
+        for t, metal in METAL_ETFS:
+            tk = yf.Ticker(t)
+            so = tk.info.get("sharesOutstanding")
+            price = tk.fast_info.get("lastPrice")
+            if so and price:
+                snap[t] = {"shares": so, "price": price}
+        prev_day = max((d for d in state if d < today), default=None)
+        if prev_day and snap:
+            flows = []
+            for t, metal in METAL_ETFS:
+                if t in snap and t in state[prev_day]:
+                    d_sh = snap[t]["shares"] - state[prev_day][t]["shares"]
+                    if d_sh:
+                        flows.append(f"{t} {'+' if d_sh > 0 else '-'}${abs(d_sh) * snap[t]['price'] / 1e6:,.0f}m")
+            if flows:
+                out.append("ETF flows since " + prev_day[5:] + " (approx): " + ", ".join(flows))
+        if snap:
+            state[today] = snap
+            state = {k: v for k, v in sorted(state.items())[-10:]}
+            METALS_STATE.write_text(json.dumps(state))
+    except Exception as ex:
+        print(f"ETF flows failed: {ex}", file=sys.stderr)
+    return (["", "<b>Metals</b>"] + [e(x) for x in out]) if out else []
+
+
+def holdings_section() -> list[str]:
+    e = html.escape
+    try:
+        import holdings
+        if not holdings.tickers():
+            return []
+        out = ["", "<b>Your holdings</b>", "<pre>" + e("\n".join(holdings.summary_lines())) + "</pre>"]
+        earn = holdings.upcoming_earnings()
+        if earn:
+            out.append("Earnings next 7 days: " + e("; ".join(earn)))
+        pa = holdings.pa_lines()
+        if pa:
+            out.append("PA: " + e("; ".join(pa)))
+        return out
+    except Exception as ex:
+        print(f"holdings section failed: {ex}", file=sys.stderr)
+        return []
+
+
 BRIEF_TOOL = {
     "name": "record_brief",
     "description": "Record the morning brief.",
@@ -225,7 +322,8 @@ def build_messages(now: datetime) -> list[str]:
     if cal:
         m1 += ["", "<b>Calendar (UK time)</b>"] + [e(x) for x in cal]
     if earn:
-        m1 += ["", "<b>S&amp;P 500 earnings today</b>", e(", ".join(earn))]
+        m1 += ["", "<b>US earnings today</b> (>$1bn)", e(", ".join(earn))]
+    m1b = (metals_lines(now) + holdings_section())[1:]   # drop leading blank line
 
     m2 = []
     if brief:
@@ -245,7 +343,8 @@ def build_messages(now: datetime) -> list[str]:
         m2 += ["<b>Latest headlines</b>"] + [
             f"• {it['ts'].astimezone(LONDON):%H:%M} {e(it['headline'][:180])} ({e(it['source'])})"
             for it in heads[:10]]
-    return ["\n".join(m1)[:4000]] + (["\n".join(m2)[:4000]] if m2 else [])
+    return (["\n".join(m1)] + (["\n".join(m1b)] if m1b else [])
+            + (["\n".join(m2)] if m2 else []))
 
 
 def main() -> int:

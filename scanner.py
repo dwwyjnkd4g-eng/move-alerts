@@ -28,6 +28,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ WHITELIST_PATH = HERE / "revolut_whitelist.txt"   # optional: one ticker per lin
 MIN_IDIO_Z = 3.0          # idiosyncratic move, in residual-vol sigmas
 MIN_ABS_RET = 0.03        # and at least a 3% raw move
 MIN_PRICE = 5.0
-MIN_DOLLAR_VOL = 20e6     # 20d avg $ volume
+MIN_DOLLAR_VOL = 10e6     # 20d avg $ volume (liquidity floor for the wide universe)
 MAX_ALERTS_PER_RUN = 10
 BETA_WINDOW = 120         # days for beta to sector ETF
 RESID_WINDOW = 60         # days for residual vol
@@ -79,15 +80,157 @@ MARKET_ETF = "SPY"
 # --------------------------------------------------------------------------
 # Universe
 # --------------------------------------------------------------------------
-def load_universe() -> pd.DataFrame:
-    """S&P 500 constituents with GICS sector. Columns: symbol, yf_symbol, name, sector, etf."""
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+US_LISTS = {   # Wikipedia pages; together ~ every US-listed company above roughly $1bn
+    "S&P 500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+    "S&P 400": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
+    "S&P 600": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
+    "Nasdaq-100": "https://en.wikipedia.org/wiki/Nasdaq-100",
+}
+UNIVERSE_CACHE = HERE / "cache" / "us_universe.csv"
+# Official lists of EVERY US-listed security (Nasdaq, NYSE, NYSE American, Arca, Cboe, IEX)
+SYMBOL_DIRS = ["https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+               "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"]
+_NOT_COMMON = re.compile(r"\b(warrants?|units?|rights?|preferred|preference|notes? due|debentures?|"
+                         r"perpetual|subordinated|trust preferred|depositary shares,? each representing a 1/)", re.I)
+LIQUID_CACHE = HERE / "cache" / "us_liquid.csv"
+# Leveraged / inverse ETFs (kept even though other ETFs are excluded), e.g. TQQQ, SOXL, NVDL, SQQQ, SH
+LEV_RE = re.compile(r"(\b-?\d(\.\d+)?x\b|\bultra|\bbull\b|\bbear\b|leveraged|inverse|proshares short|"
+                    r"daily target|daily .{0,40}\b(long|short)\b)", re.I)
+MIN_PRICE_UNIVERSE = 3.0
+
+
+def all_us_listings() -> pd.DataFrame:
+    """Every US-listed common stock / ADR (no ETFs, warrants, units, rights, preferreds, test issues)."""
+    rows = []
+    for url in SYMBOL_DIRS:
+        lines = [l for l in _fetch(url).splitlines() if "|" in l and not l.startswith("File Creation")]
+        df = pd.read_csv(io.StringIO("\n".join(lines)), sep="|", dtype=str, keep_default_na=False)
+        sym_col = "Symbol" if "Symbol" in df else "ACT Symbol"
+        df = df[df.get("Test Issue", "N") == "N"]
+        for _, r in df.iterrows():
+            s, name = r[sym_col].strip(), r["Security Name"]
+            if not s or re.search(r"[$^+=#*]", s):
+                continue
+            if r.get("ETF", "N") == "Y":
+                if LEV_RE.search(name):
+                    rows.append({"symbol": s, "name": name.strip(), "sector": "Leveraged ETF"})
+                continue
+            if _NOT_COMMON.search(name):
+                continue
+            rows.append({"symbol": s, "name": name.split(" - ")[0].replace(" Common Stock", "").strip(), "sector": ""})
+    return pd.DataFrame(rows).drop_duplicates("symbol")
+EXTRA_PATH = HERE / "extra_tickers.txt"   # optional: one US ticker per line, e.g. recent IPOs
+
+
+def find_table(html_text: str, min_rows: int = 20) -> pd.DataFrame | None:
+    """First table on a page that has a ticker/symbol column and enough rows."""
+    for t in pd.read_html(io.StringIO(html_text)):
+        if isinstance(t.columns, pd.MultiIndex):
+            t.columns = [" ".join(str(x) for x in c if "Unnamed" not in str(x)).strip() for c in t.columns]
+        cols = {str(c).lower(): c for c in t.columns}
+        sym = next((cols[c] for c in cols if c in ("symbol", "ticker", "ticker symbol", "epic")
+                    or c.startswith("ticker") or c.startswith("symbol")), None)
+        if sym is not None and len(t) >= min_rows:
+            name = next((cols[c] for c in cols if c in ("security", "company", "name", "company name")
+                         or c.startswith("company")), None)
+            sector = next((cols[c] for c in cols if "sector" in c or "industry" in c), None)
+            out = pd.DataFrame({"symbol": t[sym].astype(str).str.strip(),
+                                "name": t[name].astype(str) if name is not None else t[sym].astype(str),
+                                "sector": t[sector].astype(str) if sector is not None else ""})
+            return out[out["symbol"].str.len().between(1, 12)]
+    return None
+
+
+def _fetch(url: str) -> str:
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (move-alerts)"}, timeout=30)
     r.raise_for_status()
-    df = pd.read_html(io.StringIO(r.text))[0]
-    df = df.rename(columns={"Symbol": "symbol", "Security": "name", "GICS Sector": "sector"})
+    return r.text
+
+
+def load_universe(liquid_only: bool = True) -> pd.DataFrame:
+    """The whole US equity market, then a liquidity screen.
+
+    Index lists (S&P 500/400/600, Nasdaq-100) give GICS sectors; the exchange symbol directories
+    add every other listed common stock and ADR. With liquid_only, keeps names that traded at least
+    MIN_DOLLAR_VOL a day on average and closed above $3 (refreshed daily — see refresh_liquid()).
+    Columns: symbol, yf_symbol, name, sector, etf."""
+    full = _load_full_universe()
+    if not liquid_only:
+        return full
+    try:
+        liq = pd.read_csv(LIQUID_CACHE, keep_default_na=False)
+        if datetime.now(timezone.utc).timestamp() - LIQUID_CACHE.stat().st_mtime < 86400:
+            keep = set(liq["yf_symbol"])
+            return full[full["yf_symbol"].isin(keep)].reset_index(drop=True)
+    except Exception:
+        pass
+    return refresh_liquid(full)
+
+
+def refresh_liquid(full: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Download a year of daily data for every listed stock (slow: ~10-20 min, once a day) and keep the liquid ones."""
+    full = full if full is not None else _load_full_universe()
+    etfs = sorted(set(full["etf"]) | {MARKET_ETF})
+    daily = cached_daily(list(full["yf_symbol"]) + etfs)
+    dv = (daily["close"] * daily["volume"]).iloc[-VOL_WINDOW:].mean()
+    last = daily["close"].ffill().iloc[-1]
+    ok = set(dv[(dv >= MIN_DOLLAR_VOL)].index) & set(last[last >= MIN_PRICE_UNIVERSE].index)
+    try:
+        import holdings
+        ok |= {t.replace(".", "-") for t in holdings.tickers() if not t.endswith(".L")}
+    except Exception:
+        pass
+    liq = full[full["yf_symbol"].isin(ok)].reset_index(drop=True)
+    LIQUID_CACHE.parent.mkdir(exist_ok=True)
+    liq.to_csv(LIQUID_CACHE, index=False)
+    print(f"  liquid US universe: {len(liq)} of {len(full)} listed stocks")
+    return liq
+
+
+def _load_full_universe() -> pd.DataFrame:
+    df = None
+    try:
+        if UNIVERSE_CACHE.exists() and \
+                datetime.now(timezone.utc).timestamp() - UNIVERSE_CACHE.stat().st_mtime < 86400:
+            df = pd.read_csv(UNIVERSE_CACHE, keep_default_na=False)
+    except Exception:
+        df = None
+    if df is None:
+        frames = []
+        for label, url in US_LISTS.items():
+            try:
+                t = find_table(_fetch(url), min_rows=50)
+                if t is not None:
+                    frames.append(t)
+                    print(f"  universe: {label} {len(t)}")
+            except Exception as e:
+                print(f"  universe: {label} failed ({e})", file=sys.stderr)
+        try:
+            listed = all_us_listings()
+            frames.append(listed)       # after the index lists, so their sectors win on duplicates
+            print(f"  universe: all US listings {len(listed)}")
+        except Exception as e:
+            print(f"  universe: exchange symbol lists failed ({e})", file=sys.stderr)
+        if not frames:
+            raise RuntimeError("couldn't load any US stock list")
+        df = pd.concat(frames)
+        df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+        df = df.drop_duplicates("symbol")
+        UNIVERSE_CACHE.parent.mkdir(exist_ok=True)
+        df.to_csv(UNIVERSE_CACHE, index=False)
+    extras = set()
+    if EXTRA_PATH.exists():
+        extras |= {l.strip().upper() for l in EXTRA_PATH.read_text().splitlines() if l.strip() and not l.startswith("#")}
+    try:
+        import holdings
+        extras |= {t for t in holdings.tickers() if "." not in t}
+    except Exception:
+        pass
+    new = sorted(extras - set(df["symbol"]))
+    if new:
+        df = pd.concat([df, pd.DataFrame({"symbol": new, "name": new, "sector": ""})])
     df = df[["symbol", "name", "sector"]].copy()
-    df["symbol"] = df["symbol"].str.strip()
+    df["symbol"] = df["symbol"].str.strip().str.upper()
     df["yf_symbol"] = df["symbol"].str.replace(".", "-", regex=False)  # BRK.B -> BRK-B
     df["etf"] = df["sector"].map(SECTOR_ETF).fillna(MARKET_ETF)
 
@@ -105,20 +248,90 @@ def load_universe() -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # Prices
 # --------------------------------------------------------------------------
-def download_prices(yf_symbols: list[str]) -> dict[str, pd.DataFrame]:
+CHUNK = 200
+
+
+def yf_chunked(syms: list[str], fields: tuple[str, ...], **kw) -> dict[str, pd.DataFrame]:
+    """yf.download in chunks (Yahoo throttles very large requests), merged per field."""
+    import time as _time
     import yfinance as yf
 
-    raw = yf.download(
-        yf_symbols, period="1y", interval="1d", auto_adjust=True,
-        group_by="column", threads=True, progress=False,
-    )
+    parts: dict[str, list[pd.DataFrame]] = {f.lower(): [] for f in fields}
+    syms = list(dict.fromkeys(syms))
+    for i in range(0, len(syms), CHUNK):
+        chunk = syms[i:i + CHUNK]
+        for attempt in range(3):
+            try:
+                raw = yf.download(chunk, group_by="column", threads=True, progress=False, **kw)
+                break
+            except Exception as e:
+                print(f"  download retry ({e})", file=sys.stderr)
+                _time.sleep(5 * (attempt + 1))
+        else:
+            continue
+        for f in fields:
+            if f not in raw:
+                continue
+            x = raw[f]
+            if isinstance(x, pd.Series):
+                x = x.to_frame(chunk[0])
+            parts[f.lower()].append(x)
+        if len(syms) > CHUNK:
+            _time.sleep(1)
+    return {k: (pd.concat(v, axis=1).sort_index() if v else pd.DataFrame()) for k, v in parts.items()}
+
+
+def cached_daily(yf_symbols: list[str], name: str = "us", tz=None) -> dict[str, pd.DataFrame]:
+    """1y daily open/close/volume up to YESTERDAY, downloaded once a day and cached on disk."""
+    tz = tz or ET
+    path = HERE / "cache" / f"daily_{name}.pkl"
+    today = datetime.now(tz).date()
+    data = None
+    try:
+        data = pd.read_pickle(path)
+        if data["asof"] != today or not set(yf_symbols) <= set(data.get("requested", [])):
+            data = None
+    except Exception:
+        data = None
+    if data is None:
+        print(f"  refreshing daily history for {len(yf_symbols)} symbols…")
+        got = yf_chunked(yf_symbols, ("Open", "Close", "Volume"), period="1y", interval="1d", auto_adjust=True)
+        data = {"asof": today, "requested": list(yf_symbols)}
+        for k, f in got.items():
+            f.index = pd.to_datetime(f.index).tz_localize(None) if getattr(f.index, "tz", None) else pd.to_datetime(f.index)
+            data[k] = f[f.index.date < today]
+        path.parent.mkdir(exist_ok=True)
+        pd.to_pickle(data, path)
+    return {k: data[k] for k in ("open", "close", "volume")}
+
+
+def with_today(daily: dict[str, pd.DataFrame], intra: dict[str, pd.DataFrame], today) -> dict[str, pd.DataFrame]:
+    """Append today's regular-session row (open = first bar, close = last bar, volume = sum)."""
     out = {}
-    for field in ("Open", "Close", "Volume"):
-        f = raw[field]
-        if isinstance(f, pd.Series):
-            f = f.to_frame(yf_symbols[0])
-        out[field.lower()] = f.sort_index()
+    if intra["close"].empty:
+        return daily
+    ic = intra["close"]
+    reg_mask = [(t.date() == today) and _is_regular_bar(t) for t in ic.index]
+    if not any(reg_mask):
+        return daily
+    reg_c, reg_o, reg_v = ic[reg_mask], intra["open"][reg_mask], intra["volume"][reg_mask]
+    row_close = reg_c.ffill().iloc[-1]
+    row_open = reg_o.bfill().iloc[0]
+    row_vol = reg_v.fillna(0).sum()
+    ts = pd.Timestamp(today)
+    for k, row in (("close", row_close), ("open", row_open), ("volume", row_vol)):
+        f = daily[k].copy()
+        f.loc[ts] = row.reindex(f.columns)
+        out[k] = f.sort_index()
     return out
+
+
+def download_prices(yf_symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """Daily history (cached) + today's live regular-session row."""
+    today = datetime.now(ET).date()
+    daily = cached_daily(yf_symbols)
+    intra = download_intraday(yf_symbols)
+    return with_today(daily, intra, today)
 
 
 def session_fraction(now_et: datetime) -> float:
@@ -144,16 +357,19 @@ def compute_metrics(
       gap, rvol, adv_usd, ret_5d_prior, dist_52w_high, dist_52w_low.
     vol_scale projects today's partial volume to a full session (1.0 at EOD).
     """
-    logr = np.log(close).diff()
     rows = []
+    last_day = close.index[-1]
     for sym, etf in stock_to_etf.items():
         if sym not in close.columns or etf not in close.columns:
             continue
-        s = logr[sym]
-        b = logr[etf]
-        c = close[sym]
-        if c.iloc[-BETA_WINDOW - 2:].isna().any():
+        # align stock and benchmark on days both traded (exchanges have different holidays)
+        pair = pd.concat([close[sym], close[etf]], axis=1, keys=["s", "b"]).dropna()
+        if len(pair) < BETA_WINDOW + 8 or pair.index[-1] != last_day:
             continue
+        lr = np.log(pair).diff()
+        s, b, c = lr["s"], lr["b"], pair["s"]
+        volume_s = volume[sym].reindex(pair.index)
+        open_s = open_[sym].reindex(pair.index)
 
         r_today, b_today = s.iloc[-1], b.iloc[-1]
         hist_s = s.iloc[-BETA_WINDOW - 1:-1]
@@ -166,10 +382,10 @@ def compute_metrics(
         vol20 = hist_s.iloc[-VOL_WINDOW:].std()
         idio = r_today - beta * b_today
 
-        vol_hist = volume[sym].iloc[-VOL_WINDOW - 1:-1]
+        vol_hist = volume_s.iloc[-VOL_WINDOW - 1:-1]
         avg_vol = vol_hist.mean()
-        adv_usd = (close[sym].iloc[-VOL_WINDOW - 1:-1] * vol_hist).mean()
-        rvol = (volume[sym].iloc[-1] / vol_scale) / avg_vol if avg_vol > 0 else np.nan
+        adv_usd = (c.iloc[-VOL_WINDOW - 1:-1] * vol_hist).mean()
+        rvol = (volume_s.iloc[-1] / vol_scale) / avg_vol if avg_vol > 0 else np.nan
 
         win = c.iloc[-253:-1]
         rows.append({
@@ -182,7 +398,7 @@ def compute_metrics(
             "sector_ret": np.expm1(b_today),
             "idio_ret": np.expm1(idio),
             "idio_z": idio / resid_sd if resid_sd > 0 else np.nan,
-            "gap": open_[sym].iloc[-1] / c.iloc[-2] - 1,
+            "gap": open_s.iloc[-1] / c.iloc[-2] - 1,
             "rvol": rvol,
             "adv_usd": adv_usd,
             "ret_5d_prior": c.iloc[-2] / c.iloc[-7] - 1,
@@ -192,10 +408,18 @@ def compute_metrics(
     return pd.DataFrame(rows)
 
 
+LEV_MIN_Z, LEV_MIN_RET = 3.0, 0.05    # leveraged ETFs: big raw move vs their own vol also counts
+
+
+def _lev_mask(m: pd.DataFrame) -> pd.Series:
+    lev = m["name"].map(is_leveraged) if "name" in m else pd.Series(False, index=m.index)
+    return lev & (m["z"].abs() >= LEV_MIN_Z) & (m["ret"].abs() >= LEV_MIN_RET)
+
+
 def select_movers(m: pd.DataFrame) -> pd.DataFrame:
+    big = ((m["idio_z"].abs() >= MIN_IDIO_Z) & (m["ret"].abs() >= MIN_ABS_RET)) | _lev_mask(m)
     f = m[
-        (m["idio_z"].abs() >= MIN_IDIO_Z)
-        & (m["ret"].abs() >= MIN_ABS_RET)
+        big
         & (m["price"] >= MIN_PRICE)
         & (m["adv_usd"] >= MIN_DOLLAR_VOL)
     ].copy()
@@ -227,20 +451,17 @@ def session_now(now_et: datetime) -> str | None:
     return None
 
 
-def download_intraday(yf_symbols: list[str]) -> dict[str, pd.DataFrame]:
-    import yfinance as yf
-
-    raw = yf.download(yf_symbols, period="5d", interval="15m", prepost=True,
-                      auto_adjust=False, group_by="column", threads=True, progress=False)
-    out = {}
-    for field in ("Close", "Volume"):
-        f = raw[field]
-        if isinstance(f, pd.Series):
-            f = f.to_frame(yf_symbols[0])
+def download_intraday(yf_symbols: list[str], tz=None, period: str = "5d") -> dict[str, pd.DataFrame]:
+    """15-minute bars incl. pre/after-hours, index in `tz` (New York by default)."""
+    tz = tz or ET
+    got = yf_chunked(yf_symbols, ("Open", "Close", "Volume"), period=period, interval="15m",
+                     prepost=True, auto_adjust=False)
+    for k, f in got.items():
+        if f.empty:
+            continue
         idx = f.index if f.index.tz is not None else f.index.tz_localize("UTC")
-        f.index = idx.tz_convert(ET)
-        out[field.lower()] = f.sort_index()
-    return out
+        f.index = idx.tz_convert(tz)
+    return got
 
 
 def _is_regular_bar(ts: pd.Timestamp) -> bool:
@@ -312,15 +533,69 @@ def select_extended(m: pd.DataFrame, adv: pd.Series) -> pd.DataFrame:
         return m
     m = m.copy()
     m["adv_usd"] = m["yf_symbol"].map(adv)
+    big = ((m["idio_z"].abs() >= MIN_IDIO_Z) & (m["ret"].abs() >= MIN_ABS_RET)) | _lev_mask(m)
     f = m[
-        (m["idio_z"].abs() >= MIN_IDIO_Z)
-        & (m["ret"].abs() >= MIN_ABS_RET)
+        big
         & (m["price"] >= MIN_PRICE)
         & (m["adv_usd"] >= MIN_DOLLAR_VOL)
         & (m["ext_dollar_vol"] >= MIN_EXT_DOLLAR_VOL)
     ].copy()
     f["abs_idio_z"] = f["idio_z"].abs()
     return f.sort_values("abs_idio_z", ascending=False).head(MAX_ALERTS_PER_RUN)
+
+
+# --------------------------------------------------------------------------
+# Earnings overreaction gauge
+# --------------------------------------------------------------------------
+def earnings_reactions(close: pd.Series, dates: list[pd.Timestamp]) -> list[float]:
+    """Close-to-close reaction for each past earnings date (pre-market -> same day, after close -> next day)."""
+    close = close.dropna()
+    idx = close.index
+    out = []
+    for d in dates:
+        d_et = d.tz_convert(ET) if d.tzinfo else d.tz_localize(ET)
+        day = pd.Timestamp(d_et.date())
+        pos = idx.searchsorted(day)
+        if pos >= len(idx) or pos == 0:
+            continue
+        if idx[pos].date() != day.date():
+            continue  # not a trading day in our data
+        if d_et.hour >= 12:      # after close -> reaction is the next session
+            pos += 1
+            if pos >= len(idx):
+                continue
+        out.append(float(close.iloc[pos] / close.iloc[pos - 1] - 1))
+    return out
+
+
+def earnings_gauge(yf_symbol: str, close: pd.Series, move: float) -> dict | None:
+    """How big is this move vs the stock's usual earnings reaction? Uses yfinance's earnings dates."""
+    try:
+        import yfinance as yf
+        ed = yf.Ticker(yf_symbol).get_earnings_dates(limit=16)
+        if ed is None or ed.empty:
+            return None
+        now = pd.Timestamp.now(tz=ET)
+        past = [t for t in ed.index if t < now - pd.Timedelta(days=3)]
+        reac = earnings_reactions(close, past)[:8]
+        if len(reac) < 3:
+            return None
+        avg = float(np.mean(np.abs(reac)))
+        return {"avg_abs": avg, "n": len(reac), "ratio": abs(move) / avg if avg > 0 else None}
+    except Exception as e:
+        print(f"  earnings gauge failed for {yf_symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def earnings_recent(earnings: list[dict], today: date) -> bool:
+    for e in earnings:
+        try:
+            d = date.fromisoformat(e.get("date", ""))
+        except ValueError:
+            continue
+        if today - timedelta(days=2) <= d <= today:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -404,9 +679,16 @@ technical breaks, squeezes, moves with no catalyst at all.
 - Weigh: idiosyncratic size (idio_z) vs raw move; whether the sector moved; relative volume; \
 gap vs intraday trend; prior 5-day move (exhaustion?) and position vs 52-week range; and whether \
 earnings were just reported or are imminent (event risk for a fade).
+- If earnings_move_vs_typical_x is present: a move well above ~1.5-2x the stock's typical \
+earnings reaction is a classic overreaction signal; well below 1x suggests the market has \
+barely priced the news.
 - Pre-market / after-hours moves: liquidity is thin and prices can overshoot, but these sessions \
 are also when earnings and major news land, so an extended-hours move WITH a clear catalyst is \
 usually information. Here the benchmark is S&P 500 futures, not a sector ETF.
+- Leveraged/inverse ETFs (instrument field present): judge the move by its UNDERLYING (stock, \
+index or sector named in the fund name) — the ETF should move ~leverage x the underlying, so the \
+catalyst is the underlying's. Note for a fade: daily-reset decay and path dependence make holding \
+these for days costly, especially in volatile, choppy markets; size and holding period matter.
 """
 
 EXPLAIN_TOOL = {
@@ -434,6 +716,10 @@ EXPLAIN_TOOL = {
 }
 
 
+def is_leveraged(name: str) -> bool:
+    return bool(LEV_RE.search(str(name))) and bool(re.search(r"(etf|fund|shares|trust)", str(name), re.I))
+
+
 def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dict], mode: str) -> str:
     def r(x, k=100, d=2):
         return None if pd.isna(x) else round(float(x) * k, d)
@@ -450,11 +736,15 @@ def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dic
         "gap_at_open_pct": r(row.get("gap")),
         "relative_volume_x": r(row.get("rvol"), 1),
         "extended_hours_dollar_volume_m": r(row.get("ext_dollar_vol"), 1e-6, 1),
+        "earnings_move_vs_typical_x": r(row.get("earn_ratio"), 1, 1),
+        "typical_earnings_reaction_pct": r(row.get("earn_avg")),
         "prior_5d_move_pct": r(row["ret_5d_prior"]),
         "pct_from_52w_high": r(row["dist_52w_high"], 100, 1),
         "pct_from_52w_low": r(row["dist_52w_low"], 100, 1),
     }
     stats = {k: v for k, v in stats.items() if v is not None}
+    if is_leveraged(name):
+        stats["instrument"] = "leveraged/inverse ETF (see name for leverage and underlying)"
     news_txt = "\n".join(
         f"[{i}] {n['time_et']} | {n['source']} | {n['headline']}\n    {n['summary']}"
         for i, n in enumerate(news, 1)
@@ -513,10 +803,16 @@ def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str
         stats_line = (f"{e(row['etf'])} {row['sector_ret']*100:+.1f}% · β {row['beta']:.2f} · "
                       f"RVOL {row['rvol']:.1f}x · gap {row['gap']*100:+.1f}% · "
                       f"prior 5d {row['ret_5d_prior']*100:+.1f}%")
+    lev = " ⚙️ <i>leveraged ETF</i>" if is_leveraged(name) else ""
     lines = [
         f"{arrow} <b>{e(row['symbol'])}</b> {row['ret']*100:+.1f}%  "
-        f"(idio {row['idio_z']:+.1f}σ) · {e(name)} [{tag}]",
+        f"(idio {row['idio_z']:+.1f}σ) · {e(name)} [{tag}]{lev}",
         stats_line,
+    ]
+    if not pd.isna(row.get("earn_ratio", np.nan)):
+        lines.append(f"Earnings: move is <b>{row['earn_ratio']:.1f}×</b> its typical reaction "
+                     f"(avg ±{row['earn_avg']*100:.1f}% over last {int(row['earn_n'])})")
+    lines += [
         "",
         f"<b>Catalyst:</b> {e(a['catalyst_type'].replace('_', ' '))} — {e(a['catalyst_summary'])}",
         f"<b>Nature:</b> {e(a['move_nature'])} → <b>{VERDICT_LABEL.get(a['verdict'], a['verdict'])}</b> "
@@ -534,21 +830,75 @@ def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str
             else:
                 lines.append(f"[{i}] {src}: {e(n['headline'][:140])}")
     text = "\n".join(lines)
-    return text[:4000]
+    return text
 
 
-def send_telegram(text: str) -> None:
-    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+MUTE_PATH = HERE / "mute_state.json"
+
+
+def is_muted() -> bool:
+    try:
+        until = datetime.fromisoformat(json.loads(MUTE_PATH.read_text())["until"])
+        return datetime.now(timezone.utc) < until
+    except Exception:
+        return False
+
+
+def send_telegram(text: str, force: bool = False, chat_id: str | None = None) -> None:
+    """Send an HTML message. Skipped while muted (/mute) unless force=True."""
+    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    if not force and is_muted():
+        print("Muted — not sent:\n" + text[:200])
+        return
     if not token or not chat:
         print("Telegram not configured; printing instead:\n" + text)
         return
-    r = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-        timeout=20,
-    )
-    if not r.ok:
-        print(f"Telegram error {r.status_code}: {r.text}", file=sys.stderr)
+    for chunk in split_message(text):
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat, "text": chunk, "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=20,
+        )
+        if not r.ok:
+            print(f"Telegram error {r.status_code}: {r.text}", file=sys.stderr)
+            # never lose a message: resend as plain text if the formatting was rejected
+            plain = html.unescape(re.sub(r"<[^>]+>", "", chunk))
+            r2 = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                               json={"chat_id": chat, "text": plain[:4096], "disable_web_page_preview": True},
+                               timeout=20)
+            if not r2.ok:
+                print(f"Telegram plain-text retry failed {r2.status_code}: {r2.text}", file=sys.stderr)
+
+
+_TAG_RE = re.compile(r"<(/?)(b|i|u|a|pre|code)\b[^>]*>")
+
+
+def _balanced(chunk: str) -> bool:
+    depth = 0
+    for m in _TAG_RE.finditer(chunk):
+        depth += -1 if m.group(1) else 1
+    return depth == 0
+
+
+def split_message(text: str, limit: int = 3800) -> list[str]:
+    """Split a long HTML message into Telegram-sized parts at blank lines / line breaks,
+    never inside a tag pair."""
+    if len(text) <= limit:
+        return [text]
+    parts, cur = [], ""
+    for block in text.split("\n"):
+        cand = (cur + "\n" + block) if cur else block
+        if len(cand) > limit and cur and _balanced(cur):
+            parts.append(cur)
+            cur = block
+        else:
+            cur = cand
+    if cur:
+        parts.append(cur)
+    out = []
+    for p in parts:   # last resort for a single enormous line
+        out += [p[i:i + 4000] for i in range(0, len(p), 4000)] if len(p) > 4096 else [p]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -594,10 +944,28 @@ def main() -> int:
     ap.add_argument("--test-telegram", action="store_true")
     ap.add_argument("--latest", action="store_true",
                     help="scan the most recent trading day even on weekends/holidays (manual runs)")
+    ap.add_argument("--refresh", action="store_true",
+                    help="rebuild the whole-market universe, liquidity screen and daily history cache (slow)")
     args = ap.parse_args()
 
     if args.test_telegram:
         send_telegram("✅ move-alerts: Telegram is wired up.")
+        return 0
+
+    lock = HERE / "cache" / "refresh.lock"
+    if args.refresh:
+        lock.parent.mkdir(exist_ok=True)
+        lock.write_text(datetime.now(timezone.utc).isoformat())
+        try:
+            for p in (UNIVERSE_CACHE, LIQUID_CACHE):
+                p.unlink(missing_ok=True)
+            liq = refresh_liquid()
+            cached_daily(list(liq["yf_symbol"]) + sorted(set(liq["etf"]) | {MARKET_ETF}))
+        finally:
+            lock.unlink(missing_ok=True)
+        return 0
+    if lock.exists() and datetime.now(timezone.utc).timestamp() - lock.stat().st_mtime < 3600:
+        print("Daily universe refresh in progress — skipping this scan.")
         return 0
 
     now_et = datetime.now(ET)
@@ -620,8 +988,8 @@ def main() -> int:
     yf_syms = list(uni["yf_symbol"])
 
     if mode in ("pre", "post"):
-        daily = download_prices(yf_syms + [MARKET_ETF])
-        dv = (daily["close"] * daily["volume"]).iloc[-VOL_WINDOW - 1:-1].mean()
+        daily = cached_daily(yf_syms + [MARKET_ETF] + sorted(set(uni["etf"])))
+        dv = (daily["close"] * daily["volume"]).iloc[-VOL_WINDOW:].mean()
         intra = download_intraday(yf_syms + [FUTURES])
         m = compute_extended(daily["close"], intra["close"], intra["volume"], yf_syms, now_et)
         if m.empty:
@@ -629,6 +997,7 @@ def main() -> int:
             return 0
         m = m.merge(uni[["yf_symbol", "symbol", "name"]], on="yf_symbol")
         movers = select_extended(m, dv)
+        closes = daily["close"]
     else:
         etfs = sorted(set(uni["etf"]) | {MARKET_ETF})
         px = download_prices(yf_syms + etfs)
@@ -645,6 +1014,7 @@ def main() -> int:
                             dict(zip(uni["yf_symbol"], uni["etf"])), vol_scale)
         m = m.merge(uni[["yf_symbol", "symbol", "name"]], on="yf_symbol")
         movers = select_movers(m)
+        closes = px["close"]
 
     log = load_log()
     group = SESSION_GROUP.get(mode, mode)
@@ -661,6 +1031,10 @@ def main() -> int:
         sym = row["symbol"]
         news = get_news(sym, today)
         earnings = get_earnings(sym, today)
+        if earnings_recent(earnings, today) and row["yf_symbol"] in closes:
+            g = earnings_gauge(row["yf_symbol"], closes[row["yf_symbol"]], row["ret"])
+            if g and g["ratio"] is not None:
+                row["earn_ratio"], row["earn_avg"], row["earn_n"] = g["ratio"], g["avg_abs"], g["n"]
         try:
             a = explain(build_prompt(row, row["name"], news, earnings, mode), len(news))
         except Exception as ex:  # keep going; still alert the raw move

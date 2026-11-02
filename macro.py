@@ -77,6 +77,26 @@ INSTRUMENTS = [
     ("Brent crude", "yf", "BZ=F", 0.015),
     ("Natural gas", "yf", "NG=F", 0.030),
     ("Copper", "yf", "HG=F", 0.010),
+    # Refined products / European gas
+    ("Heating oil", "yf", "HO=F", 0.020),
+    ("RBOB gasoline", "yf", "RB=F", 0.020),
+    ("Dutch TTF gas", "yf", "TTF=F", 0.040),
+    ("Aluminium", "yf", "ALI=F", 0.015),
+    # Grains / softs / livestock (CBOT, ICE, CME)
+    ("Wheat", "yf", "ZW=F", 0.020),
+    ("Corn", "yf", "ZC=F", 0.015),
+    ("Soybeans", "yf", "ZS=F", 0.015),
+    ("Coffee", "yf", "KC=F", 0.030),
+    ("Cocoa", "yf", "CC=F", 0.035),
+    ("Sugar", "yf", "SB=F", 0.025),
+    ("Cotton", "yf", "CT=F", 0.020),
+    ("Live cattle", "yf", "LE=F", 0.015),
+    ("Lean hogs", "yf", "HE=F", 0.025),
+    # Freight & battery/nuclear metals (ETF proxies, US hours only)
+    ("Dry bulk freight (BDRY)", "yf", "BDRY", 0.035),
+    ("Tanker freight (BWET)", "yf", "BWET", 0.040),
+    ("Uranium (URA)", "yf", "URA", 0.025),
+    ("Lithium & battery (LIT)", "yf", "LIT", 0.025),
 ]
 # Weekend / out-of-hours gold proxy: only used when gold futures are closed.
 PAXG = ("Gold (PAXG token, 24/7 proxy)", "kraken", "PAXGUSD", 0.008)
@@ -251,7 +271,10 @@ def headlines_block(items: list[dict]) -> str:
 # --------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are a macro strategist supporting a discretionary trader who fades \
 large moves across global macro: USD and FX, precious metals, bitcoin, US and global equity \
-indices and futures, rates, energy and copper. You get move statistics, a snapshot of \
+indices and futures, rates, energy, industrial metals, grains, softs, livestock, freight \
+(dry bulk and tanker ETFs tracking freight futures), uranium and lithium. For ags, weigh \
+weather, crop/USDA reports, export data and Brazil/Black Sea supply; for freight, Chinese \
+demand, port/canal disruptions, fleet supply and seasonality. You get move statistics, a snapshot of \
 related markets, and numbered headlines.
 
 Rules:
@@ -345,12 +368,25 @@ def format_alert(name: str, st: dict, a: dict, heads: list[dict], weekend: bool)
             if h["url"]:
                 label = f'<a href="{e(h["url"], quote=True)}">{label}</a>'
             lines.append(f"[{i}] {label}: {e(h['headline'][:160])}")
-    return "\n".join(lines)[:4000]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
+MACRO_LOG = HERE / "macro_log.csv"
+MACRO_LOG_COLS = ["run_ts_utc", "date", "instrument", "source", "symbol", "price", "ret", "z",
+                  "window", "catalyst_type", "move_nature", "verdict", "confidence"]
+
+
+def log_alert(now: datetime, name: str, src_sym: tuple, st: dict, a: dict) -> None:
+    row = {"run_ts_utc": now.isoformat(timespec="seconds"), "date": now.date().isoformat(),
+           "instrument": name, "source": src_sym[0], "symbol": src_sym[1], "price": st["price"],
+           "ret": st["ret"], "z": st["z"], "window": st["window"],
+           **{k: a.get(k) for k in ["catalyst_type", "move_nature", "verdict", "confidence"]}}
+    pd.DataFrame([row])[MACRO_LOG_COLS].to_csv(MACRO_LOG, mode="a", header=not MACRO_LOG.exists(), index=False)
+
+
 def load_state() -> dict:
     try:
         return json.loads(STATE_PATH.read_text())
@@ -373,6 +409,7 @@ def main() -> int:
         instruments.append(PAXG)   # gold futures shut -> watch the 24/7 proxy
 
     stats = {}
+    sym_of = {n: (src, sym) for n, src, sym, _ in instruments}
     for name, _, sym, min_abs in instruments:
         s = series.get(sym)
         if s is None or not is_fresh(s, now):
@@ -408,6 +445,7 @@ def main() -> int:
             state[name] = {"ts": now.isoformat(timespec="seconds"), "price": st["price"],
                            "dir": math.copysign(1, st["ret"])}
             sent = True
+            log_alert(now, name, sym_of[name], st, a)
 
     if sent:
         STATE_PATH.write_text(json.dumps(state, indent=1))
