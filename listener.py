@@ -8,7 +8,7 @@ my.telegram.org), joins the squawk channels, and sees every new post within seco
   - batches posts for a few seconds, removes duplicates across channels and vs what's
     already been sent, and asks Claude which ones matter
   - 🔴 top-tier: pushed to you immediately
-  - 🟠 relevant: collected and sent as one digest every 5 minutes
+  - 🟠 relevant: sent as soon as scored (SQUAWK_INSTANT=1, default) or as a 5-minute digest (=0)
   - 📌 anything mentioning one of your holdings is always included
 
 First run (interactive, once):  python listener.py --login
@@ -34,8 +34,10 @@ LONDON = ZoneInfo("Europe/London")
 
 CHANNELS = [c.strip() for c in os.environ.get(
     "SQUAWK_CHANNELS", "financialjuice,WalterBloomberg,TreeNewsFeed").split(",") if c.strip()]
-BATCH_SECONDS = 12
+BATCH_SECONDS = 5
 ORANGE_FLUSH_MIN = 5
+# 1 = send relevant (🟠) stories as soon as they're scored too; 0 = 5-minute digest
+INSTANT = os.environ.get("SQUAWK_INSTANT", "1") == "1"
 
 queue: list[dict] = []
 orange: list[dict] = []
@@ -138,7 +140,11 @@ def process_batch(batch: list[dict]) -> None:
             send_telegram(fmt_story(s))
             sent_store.add([s["headline"]] + s["originals"])
         elif s["importance"] >= news.MIN_IMPORTANCE or s.get("holding"):
-            orange.append(s)
+            if INSTANT:
+                send_telegram(fmt_story(s))
+                sent_store.add([s["headline"]] + s["originals"])
+            else:
+                orange.append(s)
     # everything we looked at counts as seen, so the polled feed doesn't re-send it
     sent_store.add([c["headline"] for i, c in enumerate(cands, 1) if i not in picked])
 
