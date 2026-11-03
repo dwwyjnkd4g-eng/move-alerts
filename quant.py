@@ -432,6 +432,37 @@ def fit_ridge(ev: pd.DataFrame) -> dict:
     return {"cols": cols, "scaler": scaler, "models": models}
 
 
+USE_GBM = os.environ.get("QUANT_GBM", "0") == "1"   # turn on after the backtest supports it
+
+
+def fit_gbm(train: pd.DataFrame):
+    """Shallow gradient-boosted trees per horizon (captures interactions ridge can't)."""
+    try:
+        from sklearn.ensemble import HistGradientBoostingRegressor
+    except Exception:
+        return None
+    cols = [c for c in FEATURES if c in train]
+    models = {}
+    for h in HORIZONS:
+        y = train[f"fade_{h}"]
+        ok = y.notna()
+        if ok.sum() < 200:
+            continue
+        m = HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=300, min_samples_leaf=40,
+                                          l2_regularization=1.0, early_stopping=True, validation_fraction=0.2,
+                                          n_iter_no_change=20, random_state=0)
+        m.fit(train.loc[ok, cols].values, y[ok].values)
+        models[h] = m
+    return {"cols": cols, "models": models} if models else None
+
+
+def gbm_predict_one(g: dict | None, x: dict) -> dict:
+    if not g:
+        return {}
+    row = np.array([[np.nan if x.get(c) is None else x[c] for c in g["cols"]]], dtype=float)
+    return {h: float(m.predict(row)[0]) for h, m in g["models"].items()}
+
+
 def ridge_predict(model: dict, x: dict) -> dict:
     if not model:
         return {}
@@ -476,6 +507,7 @@ def base_rates_cached(name: str, loader, market: str | None = None) -> dict:
         br = build_base_rates(ev)
         br["ev"] = ev
         br["ridge"] = fit_ridge(ev)
+        br["gbm"] = fit_gbm(ev) if USE_GBM else None
         c = close[[s for s in bench_of if s in close]]
         br["breadth_last"] = float((c.iloc[-1] > c.iloc[-50:].mean()).mean()) if len(c) > 50 else None
         br["mkt20_last"] = float(close[mkt].iloc[-1] / close[mkt].iloc[-21] - 1) if mkt else None
@@ -744,6 +776,10 @@ def equity_plan(row, closes: pd.DataFrame, base: dict, intraday_close: pd.Series
     bucket, label = lookup(base, direction, float(row["idio_z"]), row.get("rvol"), gapf)
     own = stock_analogs(sym, bench or ("^STOXX50E" if mkt != "us" else "SPY"), direction)
     stats = ensemble(ridge, knn, bucket, own)
+    gb = gbm_predict_one(base.get("gbm"), x)
+    for h, v in gb.items():                    # trees blended 50/50 with the ensemble mean
+        if h in stats:
+            stats[h]["mean"] = 0.5 * stats[h]["mean"] + 0.5 * v
     for h in stats:
         stats[h]["n_own"] = own.get(h, {}).get("n", 0)
     # vol: post-shock idio vol (today's |idio| enters the EWMA) decaying to the long-run level
@@ -754,7 +790,7 @@ def equity_plan(row, closes: pd.DataFrame, base: dict, intraday_close: pd.Series
     earn = next_earnings(sym)
     plan = make_plan_v2(sym, float(row["price"]), float(row["ret"]), stats, sig0, sig_lr, dv, mkt, events, earn)
     plan.update({"bucket": label, "features": feats, "regime": regime, "earnings": earn,
-                 "model": {"ridge5": ridge.get(5), "knn5": knn.get(5, {}).get("mean"), "knn_k": knn.get("k"),
+                 "model": {"ridge5": ridge.get(5), "gbm5": gb.get(5), "knn5": knn.get(5, {}).get("mean"), "knn_k": knn.get("k"),
                            "bucket5": bucket.get(5, {}).get("mean"), "own5": own.get(5, {}).get("mean"),
                            "own_n": own.get(5, {}).get("n", 0)},
                  "own": {h: own.get(h, {}) for h in HORIZONS}, "x": x})
@@ -898,6 +934,8 @@ def plan_lines(plan: dict, ccy_note: str = "") -> list[str]:
             bits = []
             if m.get("ridge5") is not None:
                 bits.append(f"ridge {_p(m['ridge5'])}")
+            if m.get("gbm5") is not None:
+                bits.append(f"trees {_p(m['gbm5'])}")
             if m.get("knn5") is not None:
                 bits.append(f"{m.get('knn_k')} nearest analogs {_p(m['knn5'])}")
             if m.get("bucket5") is not None:
