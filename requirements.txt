@@ -5,3 +5,4 @@ lxml>=5.0
 yfinance>=0.2.50
 anthropic>=0.40
 telethon>=1.36
+scikit-learn>=1.4

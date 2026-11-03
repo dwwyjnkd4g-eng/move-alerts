@@ -283,6 +283,8 @@ def events_table(close: pd.DataFrame, open_: pd.DataFrame | None, volume: pd.Dat
         return df.stack().reindex(idx).values if df is not None else np.nan
 
     out = pd.DataFrame({"z": at(z), "ret": at(raw)}, index=idx)
+    out["z"] = pd.to_numeric(out["z"], errors="coerce").astype("float64")
+    out["ret"] = pd.to_numeric(out["ret"], errors="coerce").astype("float64")
     out["dir"] = np.sign(out["z"])
     for h in HORIZONS:
         out[f"fade_{h}"] = -out["dir"] * at(resid.rolling(h).sum().shift(-h))
@@ -317,7 +319,19 @@ def events_table(close: pd.DataFrame, open_: pd.DataFrame | None, volume: pd.Dat
         out["vix"], out["vixts"] = vv["vix"].values, vv["vixts"].values
     else:
         out["vix"], out["vixts"] = np.nan, np.nan
-    return out.reset_index(names=["date", "symbol"])
+    return _numeric(out.reset_index(names=["date", "symbol"]))
+
+
+def _numeric(ev: pd.DataFrame) -> pd.DataFrame:
+    """Force feature/outcome columns to float64 (pandas 3 can hand back object dtype from stack/reindex)."""
+    if ev is None or ev.empty:
+        return ev
+    ev = ev.copy()
+    num = set(FEATURES) | set(KNN_FEATURES) | {"z", "ret", "vol250", "price"} | {f"fade_{h}" for h in HORIZONS}
+    for c in ev.columns:
+        if c in num:
+            ev[c] = pd.to_numeric(ev[c], errors="coerce").astype("float64")
+    return ev
 
 
 # --------------------------------------------------------------------------
@@ -389,16 +403,23 @@ def lookup(br: dict, direction: int, z: float, rvol: float | None, gapf: float |
 def _standardise(df: pd.DataFrame, cols: list[str]) -> tuple[np.ndarray, dict]:
     mu = {c: float(df[c].mean()) if df[c].notna().any() else 0.0 for c in cols}
     sd = {c: float(df[c].std()) if df[c].notna().sum() > 2 and df[c].std() > 0 else 1.0 for c in cols}
-    X = np.column_stack([((df[c] - mu[c]) / sd[c]).fillna(0.0).values for c in cols])
+    X = np.column_stack([((df[c] - mu[c]) / sd[c]).fillna(0.0).values for c in cols]).astype("float64")
     return X, {"mu": mu, "sd": sd}
 
 
 def _apply_std(x: dict, cols: list[str], scaler: dict) -> np.ndarray:
-    return np.array([0.0 if x.get(c) is None or (isinstance(x.get(c), float) and math.isnan(x.get(c)))
-                     else (x[c] - scaler["mu"][c]) / scaler["sd"][c] for c in cols])
+    out = []
+    for c in cols:
+        try:
+            v = float(x.get(c))
+        except (TypeError, ValueError):
+            v = float("nan")
+        out.append(0.0 if math.isnan(v) else (v - scaler["mu"][c]) / scaler["sd"][c])
+    return np.array(out, dtype="float64")
 
 
 def fit_ridge(ev: pd.DataFrame) -> dict:
+    ev = _numeric(ev)
     cols = [c for c in FEATURES if c in ev and ev[c].notna().mean() > 0.5]
     if len(ev) < 80 or not cols:
         return {}
@@ -407,7 +428,7 @@ def fit_ridge(ev: pd.DataFrame) -> dict:
     folds = rng.integers(0, 5, len(ev))
     models = {}
     for h in HORIZONS:
-        y = ev[f"fade_{h}"].values
+        y = ev[f"fade_{h}"].to_numpy(dtype="float64")
         ok = ~np.isnan(y)
         Xh, yh, fh = X[ok], y[ok], folds[ok]
         best = None
@@ -441,6 +462,7 @@ def fit_gbm(train: pd.DataFrame):
         from sklearn.ensemble import HistGradientBoostingRegressor
     except Exception:
         return None
+    train = _numeric(train)
     cols = [c for c in FEATURES if c in train]
     models = {}
     for h in HORIZONS:
@@ -451,15 +473,22 @@ def fit_gbm(train: pd.DataFrame):
         m = HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=300, min_samples_leaf=40,
                                           l2_regularization=1.0, early_stopping=True, validation_fraction=0.2,
                                           n_iter_no_change=20, random_state=0)
-        m.fit(train.loc[ok, cols].values, y[ok].values)
+        m.fit(train.loc[ok, cols].to_numpy(dtype="float64"), y[ok].to_numpy(dtype="float64"))
         models[h] = m
     return {"cols": cols, "models": models} if models else None
+
+
+def _f(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def gbm_predict_one(g: dict | None, x: dict) -> dict:
     if not g:
         return {}
-    row = np.array([[np.nan if x.get(c) is None else x[c] for c in g["cols"]]], dtype=float)
+    row = np.array([[_f(x.get(c)) for c in g["cols"]]], dtype=float)
     return {h: float(m.predict(row)[0]) for h, m in g["models"].items()}
 
 
@@ -472,6 +501,7 @@ def ridge_predict(model: dict, x: dict) -> dict:
 
 
 def knn_stats(ev: pd.DataFrame, x: dict, k: int | None = None) -> dict:
+    ev = _numeric(ev)
     cols = [c for c in KNN_FEATURES if c in ev and ev[c].notna().mean() > 0.5]
     if len(ev) < 40 or not cols:
         return {}

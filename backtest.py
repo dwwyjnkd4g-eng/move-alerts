@@ -110,6 +110,7 @@ def build_events(d: dict) -> pd.DataFrame:
     ev["vol250"] = vols
     ev["price"] = prices
     ev["date"] = pd.to_datetime(ev["date"])
+    ev = Q._numeric(ev)
     return ev.sort_values("date").reset_index(drop=True)
 
 
