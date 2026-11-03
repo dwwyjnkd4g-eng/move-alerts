@@ -51,6 +51,8 @@ MIN_BUCKET = 30
 EWMA_PHI = 0.94
 STOP_K = 1.0
 MIN_RR = float(os.environ.get("MIN_RR", "0.33"))   # below this reward/risk the plan is "no edge"
+# Backtest (US, Jun 2024 - Oct 2026): only plans scoring 75+ made money net of costs; below that they lost.
+MIN_PLAN_SCORE = int(os.environ.get("MIN_PLAN_SCORE", "75"))
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE", "0.005"))   # 0.5% of capital at risk per trade
 FX_COST = float(os.environ.get("FX_COST", "0"))                     # e.g. 0.005 for 0.25% each way
 
@@ -326,11 +328,13 @@ def _numeric(ev: pd.DataFrame) -> pd.DataFrame:
     """Force feature/outcome columns to float64 (pandas 3 can hand back object dtype from stack/reindex)."""
     if ev is None or ev.empty:
         return ev
-    ev = ev.copy()
     num = set(FEATURES) | set(KNN_FEATURES) | {"z", "ret", "vol250", "price"} | {f"fade_{h}" for h in HORIZONS}
-    for c in ev.columns:
-        if c in num:
-            ev[c] = pd.to_numeric(ev[c], errors="coerce").astype("float64")
+    bad = [c for c in ev.columns if c in num and ev[c].dtype != np.float64]
+    if not bad:                       # already clean: no copy (called per event in the backtest)
+        return ev
+    ev = ev.copy()
+    for c in bad:
+        ev[c] = pd.to_numeric(ev[c], errors="coerce").astype("float64")
     return ev
 
 
@@ -824,7 +828,20 @@ def equity_plan(row, closes: pd.DataFrame, base: dict, intraday_close: pd.Series
                            "bucket5": bucket.get(5, {}).get("mean"), "own5": own.get(5, {}).get("mean"),
                            "own_n": own.get(5, {}).get("n", 0)},
                  "own": {h: own.get(h, {}) for h in HORIZONS}, "x": x})
+    plan["prior"] = backtest_prior("us" if mkt == "us" else "eu")
+    if plan.get("edge") and plan.get("score", 0) < MIN_PLAN_SCORE:
+        plan.update({"edge": False, "score_raw": plan["score"],
+                     "note": f"edge score {plan['score']}/100 is below {MIN_PLAN_SCORE} — in the backtest, "
+                             f"plans under {MIN_PLAN_SCORE} lost money after costs, so no trade"})
     return plan
+
+
+def backtest_prior(market: str) -> dict | None:
+    """Headline numbers from the last walk-forward backtest (written by backtest.py), for the LLM and alerts."""
+    try:
+        return json.loads((CACHE / f"backtest_summary_{market}.json").read_text())
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -1030,6 +1047,10 @@ def plan_for_prompt(plan: dict) -> dict:
     keep["notes"] = plan.get("notes")
     keep["regime"] = plan.get("regime")
     keep["model_5d"] = plan.get("model")
+    if plan.get("prior"):
+        keep["backtest_prior"] = plan["prior"]
+    if plan.get("score_raw") is not None:
+        keep["score_below_threshold"] = plan["score_raw"]
     keep["features"] = {k: (round(v, 3) if isinstance(v, float) and not np.isnan(v) else None)
                         for k, v in (plan.get("features") or {}).items()}
     return json.loads(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in keep.items()}, default=str))

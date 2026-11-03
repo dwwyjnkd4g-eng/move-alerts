@@ -317,7 +317,16 @@ def main() -> int:
                  "what_would_change_view": "-", "confidence": "low"}
         text = S.format_alert(row, row["name"], a, allnews, "intraday" if mode == "live" else "eod", plan)
         text = text.replace(" [live]", " [Europe · live]").replace(" [close]", " [Europe · close]")
-        print(text) if args.dry_run else S.send_telegram(text)
+        if args.dry_run:
+            print(text)
+        else:
+            S.send_telegram(text)
+            try:
+                import paper, quant
+                paper.book_trade(quant.market_of(row["yf_symbol"]), "yf", row["yf_symbol"], str(row["symbol"]),
+                                 plan, a.get("verdict"), float(row["price"]))
+            except Exception as ex:
+                print(f"  paper booking failed: {ex}", file=sys.stderr)
         records.append({
             "run_ts_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), "date": today.isoformat(),
             "mode": "eu", "symbol": row["symbol"],

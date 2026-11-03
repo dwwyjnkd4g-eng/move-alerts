@@ -14,6 +14,7 @@ if your alerts go to a channel). Commands:
   /remove TICKER                remove a position
   /holdperiod DAYS              set your PA minimum holding period
   /scorecard                    how the fade calls have done
+  /paper                        paper-trading book: open trades and results so far
   /cot                          latest CFTC positioning
   /week                         week-ahead preview
   /mute 2h | 30m                pause alerts       /unmute   resume
@@ -144,6 +145,11 @@ def cmd_scorecard(_args: str) -> str:
     return followups.scorecard_text()
 
 
+def cmd_paper(_args: str) -> str:
+    import paper
+    return paper.report_text()
+
+
 def cmd_cot(_args: str) -> str:
     import cot
     return cot.build_message()
@@ -164,8 +170,9 @@ COMMANDS = {
     "add": cmd_add, "remove": cmd_remove, "holdperiod": cmd_holdperiod, "holdings": cmd_holdings,
     "why": cmd_why, "brief": cmd_brief, "levels": cmd_levels, "scorecard": cmd_scorecard,
     "cot": cmd_cot, "week": cmd_week, "snapshot": cmd_snapshot, "markets": cmd_snapshot,
+    "paper": cmd_paper,
 }
-SLOW = {"why", "brief", "holdings", "scorecard", "cot", "week", "levels", "snapshot", "markets"}
+SLOW = {"paper", "why", "brief", "holdings", "scorecard", "cot", "week", "levels", "snapshot", "markets"}
 
 
 def handle(text: str) -> list[str]:

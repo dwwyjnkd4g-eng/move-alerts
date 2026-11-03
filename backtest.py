@@ -31,6 +31,7 @@ A strategy trades an event only if its best predicted horizon beats costs; hold 
 from __future__ import annotations
 
 import argparse
+import json
 import html
 import math
 import sys
@@ -166,7 +167,12 @@ def run(ev: pd.DataFrame, market: str) -> pd.DataFrame:
     ev["month"] = ev["date"].dt.to_period("M")
     months = sorted(ev["month"].unique())
     trades = []
-    has_gbm = True
+    try:
+        import sklearn  # noqa: F401
+        has_gbm = True
+    except Exception:
+        has_gbm = False
+        print("  (scikit-learn not available — tree model skipped)", file=sys.stderr)
     t0 = time.time()
     for M in months:
         start = M.to_timestamp()
@@ -177,9 +183,6 @@ def run(ev: pd.DataFrame, market: str) -> pd.DataFrame:
         br = Q.build_base_rates(train)
         ridge = Q.fit_ridge(train)
         gbm = fit_gbm(train) if has_gbm else None
-        if gbm is None and has_gbm:
-            has_gbm = False
-            print("  (scikit-learn not available — tree model skipped)", file=sys.stderr)
         gp = gbm_predict(gbm, test)
         for j, (_, e) in enumerate(test.iterrows()):
             side = 1 if e["dir"] < 0 else -1          # fade
@@ -204,6 +207,20 @@ def run(ev: pd.DataFrame, market: str) -> pd.DataFrame:
                 "ens+gbm": {h: s["mean"] for h, s in ensg.items()},
             }
             base = {"date": e["date"], "symbol": e["symbol"], "dir": e["dir"], "z": e["z"], "cost": cost}
+            # momentum: trade WITH the move (the inverse of a fade)
+            fcost = Q.cost_estimate(e["symbol"], dv, "long" if side < 0 else "short")
+            follow = {"follow": {3: 1.0}}
+            if g:
+                follow["follow+gbm"] = {h: -v for h, v in g.items()}
+                follow["follow+ens"] = {h: -s["mean"] for h, s in ensg.items()}
+            for name, p in follow.items():
+                h, net = (3, 1.0) if name == "follow" else choose(p, fcost)
+                if h is None:
+                    continue
+                pnl, _ = realise(e, h, -side, fcost)
+                if not pd.isna(pnl):
+                    trades.append({**base, "strategy": name, "hold": h, "pred": net, "pnl": pnl, "hedged": np.nan,
+                                   "exit": "hold"})
             for name, p in preds.items():
                 if not p:
                     continue
@@ -259,9 +276,10 @@ def summarise(tr: pd.DataFrame) -> pd.DataFrame:
             "pos_months": (m > 0).mean() if len(m) else np.nan, "max_dd": max_drawdown(g["pnl"]),
             "avg_hold": g["hold"].mean(), "hedged_avg": g["hedged"].mean(),
         })
-    order = ["baseline", "bucket", "ridge", "knn", "gbm", "ensemble", "ens+gbm", "plan", "plan+gbm"]
+    order = ["baseline", "bucket", "ridge", "knn", "gbm", "ensemble", "ens+gbm", "plan", "plan+gbm",
+             "follow", "follow+gbm", "follow+ens"]
     df = pd.DataFrame(rows)
-    df["o"] = df["strategy"].map({k: i for i, k in enumerate(order)})
+    df["o"] = df["strategy"].map({k: i for i, k in enumerate(order)}).fillna(99)
     return df.sort_values("o").drop(columns="o")
 
 
@@ -278,19 +296,41 @@ def report(tr: pd.DataFrame, market: str) -> str:
         p = tr[tr["strategy"] == name].copy()
         if len(p) >= 40 and "score" in p:
             p["bucket"] = pd.cut(p["score"], [0, 55, 65, 75, 101], labels=["<55", "55-64", "65-74", "75+"], right=False)
-            lines += ["", f"{name}: by edge score", f"{'score':<7}{'trades':>7}{'hit':>6}{'avg':>8}{'target':>8}{'stop':>6}"]
+            lines += ["", f"{name}: by edge score", f"{'score':<7}{'trades':>7}{'hit':>6}{'avg':>8}{'t':>6}{'target':>8}{'stop':>6}"]
             for b, g in p.groupby("bucket", observed=True):
-                lines.append(f"{str(b):<7}{len(g):>7}{(g['pnl']>0).mean()*100:>5.0f}%{g['pnl'].mean()*100:>+7.2f}%"
+                t = g["pnl"].mean() / g["pnl"].std() * math.sqrt(len(g)) if len(g) > 2 and g["pnl"].std() > 0 else float("nan")
+                lines.append(f"{str(b):<7}{len(g):>7}{(g['pnl']>0).mean()*100:>5.0f}%{g['pnl'].mean()*100:>+7.2f}%{t:>6.1f}"
                              f"{(g['exit']=='target').mean()*100:>7.0f}%{(g['exit']=='stop').mean()*100:>5.0f}%")
     best = s[s["strategy"] != "baseline"].sort_values("t", ascending=False).head(1)
     if len(best):
         lines += ["", f"Best by t-stat: {best.iloc[0]['strategy']}"]
-    yrs = tr[tr["strategy"].isin(["baseline", "ensemble", "ens+gbm", "plan"])].copy()
+    yrs = tr[tr["strategy"].isin(["baseline", "ens+gbm", "plan+gbm", "follow", "follow+gbm"])].copy()
     yrs["year"] = yrs["date"].dt.year
     lines += ["", "By year (avg net P&L per trade, trades):"]
     for (st, y), g in yrs.groupby(["strategy", "year"]):
         lines.append(f"  {st:<9} {y}: {g['pnl'].mean()*100:+.2f}% ({len(g)})")
     return "\n".join(lines)
+
+
+def save_summary(tr: pd.DataFrame, market: str) -> None:
+    """Compact headline numbers the live bot feeds to the analyst (quant.backtest_prior)."""
+    def st(g):
+        if len(g) < 3:
+            return None
+        return {"avg": round(float(g["pnl"].mean()), 4), "t": round(float(g["pnl"].mean() / g["pnl"].std() * math.sqrt(len(g))), 1),
+                "hit": round(float((g["pnl"] > 0).mean()), 2), "n": int(len(g))}
+    out = {"period": f"{tr['date'].min():%b %Y} - {tr['date'].max():%b %Y}", "market": market}
+    for name, key in (("baseline", "fade_all"), ("follow", "follow_all"), ("follow+gbm", "follow_model")):
+        s = st(tr[tr["strategy"] == name])
+        if s:
+            out[f"{key}_avg"], out[f"{key}_t"], out[f"{key}_n"] = s["avg"], s["t"], s["n"]
+    pg = tr[tr["strategy"] == "plan+gbm"]
+    if "score" in pg:
+        for lo, hi, lab in ((0, Q.MIN_PLAN_SCORE, "below"), (Q.MIN_PLAN_SCORE, 101, "above")):
+            s = st(pg[(pg["score"] >= lo) & (pg["score"] < hi)])
+            if s:
+                out[f"plan_score_{lab}_{Q.MIN_PLAN_SCORE}"] = s
+    (HERE / "cache" / f"backtest_summary_{market}.json").write_text(json.dumps(out, indent=1))
 
 
 def main() -> int:
@@ -310,6 +350,7 @@ def main() -> int:
     out = HERE / "cache" / f"backtest_trades_{args.market}.csv"
     tr.to_csv(out, index=False)
     rep = report(tr, args.market)
+    save_summary(tr, args.market)
     print("\n" + rep + f"\n\nTrades saved to {out}")
     if args.telegram:
         from scanner import send_telegram

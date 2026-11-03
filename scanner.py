@@ -749,6 +749,13 @@ take the plan as given, adjust it (tighter stop, shorter hold, smaller size), or
 hold and exit date already account for scheduled events (earnings, FOMC, elections, holidays, expiries) \
 and costs; flag anything in the news that the calendar can't see (e.g. a pending ruling, an investor day, \
 a takeover deadline) and how the market regime should change your confidence.
+- BACKTEST PRIOR (quant plan field backtest_prior, if present): a walk-forward test of fading every \
+large idiosyncratic move in this market, net of costs. If fade_all_avg is negative (it was strongly \
+negative for US stocks 2024-26: big moves more often CONTINUED than reversed), "fade" is NOT the default: \
+call fade_candidate only when there is a specific reason this move is flow/overreaction (no news, \
+sympathy, index flow, clear overshoot vs the news, washed-out positioning) AND the quant plan has an \
+edge. Otherwise prefer do_not_fade or unclear, and say if the move looks more like a continuation \
+(follow) trade. If the plan says the edge score is below threshold, do not override it into a trade.
 - Leveraged/inverse ETFs (instrument field present): judge the move by its UNDERLYING (stock, \
 index or sector named in the fund name) — the ETF should move ~leverage x the underlying, so the \
 catalyst is the underlying's. Note for a fade: daily-reset decay and path dependence make holding \
@@ -1015,6 +1022,37 @@ def append_log(records: list[dict]) -> None:
     df.to_csv(LOG_PATH, mode="a", header=not LOG_PATH.exists(), index=False)
 
 
+EXT_STEP = float(os.environ.get("EXTENSION_STEP", "0.05"))   # extra move needed for a follow-on alert
+
+
+def extension_alerts(movers: pd.DataFrame, today_log: pd.DataFrame, today, mode: str) -> None:
+    """A stock already alerted today has moved a lot further the same way: send one short line
+    instead of a fresh full alert (no LLM call), and log it so it only fires again on a further step."""
+    if movers.empty or today_log.empty:
+        return
+    lines, recs = [], []
+    for _, r in movers.iterrows():
+        prev = today_log[today_log["symbol"] == r["symbol"]]
+        if prev.empty:
+            continue
+        first, last_ret = prev.iloc[0], float(prev["ret"].iloc[-1])
+        step = max(EXT_STEP, 0.5 * abs(float(first["ret"])))
+        if np.sign(r["ret"]) != np.sign(last_ret) or abs(r["ret"]) - abs(last_ret) < step:
+            continue
+        verdict = VERDICT_LABEL.get(str(first.get("verdict")), str(first.get("verdict")))
+        lines.append(f"↪️ <b>{html.escape(r['symbol'])}</b> extends: {float(first['ret'])*100:+.1f}% → "
+                     f"<b>{r['ret']*100:+.1f}%</b> (idio {r['idio_z']:+.1f}σ) · first flagged "
+                     f"{str(first['run_ts_utc'])[11:16]} UTC as {html.escape(verdict)}")
+        recs.append({"run_ts_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                     "date": today.isoformat(), "mode": mode, "symbol": r["symbol"], "price": r["price"],
+                     "ret": r["ret"], "z": r.get("z"), "idio_z": r.get("idio_z"), "verdict": "extension",
+                     "catalyst_summary": "follow-on: move extended"})
+    if lines:
+        send_telegram("\n".join(lines) + "\n<i>Continuation after the first alert — the original fade call is "
+                      "weaker now; /why TICKER for a fresh read.</i>")
+        append_log(recs)
+
+
 def plan_fields(plan: dict | None) -> dict:
     if not plan or not plan.get("edge"):
         return {"plan_side": "none" if plan else None, "plan_target": None, "plan_stop": None,
@@ -1128,6 +1166,11 @@ def main() -> int:
         already = set()
     new_movers = movers[~movers["symbol"].isin(already)]
     print(f"Flagged {len(movers)} ({len(new_movers)} new).")
+    if already and not args.dry_run:
+        try:
+            extension_alerts(movers[movers["symbol"].isin(already)], log[same], today, mode)
+        except Exception as ex:
+            print(f"  extension alerts failed: {ex}", file=sys.stderr)
 
     records = []
     base = us_base_rates() if len(new_movers) else {}
@@ -1158,6 +1201,11 @@ def main() -> int:
             print("\n" + text + "\n" + "-" * 60)
         else:
             send_telegram(text)
+            try:
+                import paper
+                paper.book_trade("us", "yf", row["yf_symbol"], row["symbol"], plan, a.get("verdict"), float(row["price"]))
+            except Exception as ex:
+                print(f"  paper booking failed: {ex}", file=sys.stderr)
         records.append({
             "run_ts_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "date": today.isoformat(), "mode": mode, "symbol": sym,

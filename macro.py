@@ -531,6 +531,17 @@ def main() -> int:
                            "dir": math.copysign(1, st["ret"])}
             sent = True
             log_alert(now, name, sym_of[name], st, a)
+            try:
+                import paper
+                src, psym = sym_of[name][0], sym_of[name][1]
+                if src == "otc":
+                    src, psym = "yf", OTC_FUT[psym]
+                elif src == "yf_prepost":
+                    src = "yf"
+                if src in ("yf", "kraken"):
+                    paper.book_trade("macro", src, psym, name, plan, a.get("verdict"), float(st["price"]))
+            except Exception as ex:
+                print(f"paper booking failed: {ex}", file=sys.stderr)
 
     if sent:
         STATE_PATH.write_text(json.dumps(state, indent=1))
