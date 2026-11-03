@@ -720,6 +720,20 @@ def _norm_cdf(x: float) -> float:
 def make_plan_v2(sym: str, price: float, move: float, stats: dict, sig0: float, sig_lr: float,
                  dv: float | None, mkt: str, events: list[dict], earnings: date | None,
                  today: date | None = None) -> dict:
+    plan = _make_plan_v2(sym, price, move, stats, sig0, sig_lr, dv, mkt, events, earnings, today)
+    if not plan.get("edge"):     # keep what's needed for the trade card's "continuation / reference" view
+        plan.setdefault("curve", {h: st["mean"] for h, st in stats.items() if st.get("mean") is not None})
+        plan.setdefault("sig0", sig0)
+        plan.setdefault("sig_lr", sig_lr)
+        plan.setdefault("entry", price)
+        plan.setdefault("unit", "d")
+        plan.setdefault("mkt", mkt)
+    return plan
+
+
+def _make_plan_v2(sym: str, price: float, move: float, stats: dict, sig0: float, sig_lr: float,
+                  dv: float | None, mkt: str, events: list[dict], earnings: date | None,
+                  today: date | None = None) -> dict:
     today = today or date.today()
     side = "long" if move < 0 else "short"
     sgn = 1 if side == "long" else -1
@@ -1136,6 +1150,46 @@ def _exit_label(plan: dict) -> str:
     if isinstance(x, date):
         return x.strftime("%a %d %b")
     return ""
+
+
+def trade_card(plan: dict | None) -> str | None:
+    """One line, always: what to do, target, stop, hold. Fade plan if there is one; otherwise the fade
+    levels for reference (score below threshold) or the model's continuation view."""
+    if not plan:
+        return None
+    if plan.get("edge"):
+        verb = "BUY" if plan["side"] == "long" else "SELL"
+        return (f"🎯 <b>{verb} (fade)</b> · target <b>{fmt_px(plan['target'])}</b> ({_p(plan['tgt_pct'])}) · "
+                f"stop <b>{fmt_px(plan['stop'])}</b> · hold <b>{hold_label(plan)}</b> (exit {_exit_label(plan)})")
+    if plan.get("score_raw") is not None and plan.get("target") and plan.get("stop"):
+        return (f"🎯 <b>No trade</b> (edge {plan['score_raw']}/100 &lt; {MIN_PLAN_SCORE}) · fade levels for reference: "
+                f"target {fmt_px(plan['target'])} · stop {fmt_px(plan['stop'])} · hold {hold_label(plan)}")
+    curve, entry = plan.get("curve") or {}, plan.get("entry")
+    if curve and entry:
+        sig0, sig_lr = plan.get("sig0") or 0.02, plan.get("sig_lr") or 0.02
+        cost = plan.get("cost") or 0.0
+        best = None
+        for h, m in curve.items():
+            cont = -m - cost                                 # continuation = the move keeps going
+            s_h = sigma_path(sig0, sig_lr, h)
+            sc = cont / s_h if s_h else -1
+            if best is None or sc > best[0]:
+                best = (sc, h, -m)
+        sc, h, cont = best
+        side_move = -1 if plan.get("side") == "long" else 1   # the move's own direction
+        if sc > 0.05 and cont > 0:
+            lvl = entry * (1 + side_move * cont)
+            stop = entry * (1 - side_move * 1.0 * sigma_path(sig0, sig_lr, h))
+            return (f"🎯 <b>No fade</b> · model leans continuation: {cont*100:+.1f}% more over {h}d → "
+                    f"level {fmt_px(lvl)} · invalidation {fmt_px(stop)} · <i>continuation view not yet backtested</i>")
+        m5 = curve.get(5)
+        return "🎯 <b>No trade</b> · no edge either way" + (f" (similar moves: {_p(m5)} fade over 5d)" if m5 is not None else "")
+    return "🎯 <b>No trade</b> · " + _h_escape(plan.get("note", "no edge"))
+
+
+def _h_escape(x: str) -> str:
+    import html as _h
+    return _h.escape(str(x))
 
 
 def plan_lines(plan: dict, ccy_note: str = "") -> list[str]:

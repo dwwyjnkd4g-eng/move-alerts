@@ -756,6 +756,11 @@ call fade_candidate only when there is a specific reason this move is flow/overr
 sympathy, index flow, clear overshoot vs the news, washed-out positioning) AND the quant plan has an \
 edge. Otherwise prefer do_not_fade or unclear, and say if the move looks more like a continuation \
 (follow) trade. If the plan says the edge score is below threshold, do not override it into a trade.
+- STREET VIEW (street_view, if present): sell-side consensus, price targets and rating changes in the \
+last 7 days. A downgrade/upgrade or price-target change today IS a catalyst (often an information move \
+for 1-3 days, especially from a top-tier firm or with a big PT change). A price far below the lowest \
+target after a no-news drop strengthens a fade; a stock already above the mean target after a spike \
+weakens a long-side view. Mention the street view in the rationale when it matters.
 - PREDICTION MARKETS: if the plan lists prediction_market_events_in_hold, a scheduled event priced near a \
 coin flip sits inside the hold — the plan has already shortened the hold or widened the stop; say if that \
 is enough. If PREDICTION-MARKET REPRICINGS show an event this stock is exposed to (tariffs, defence, rates, \
@@ -821,6 +826,13 @@ def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dic
         "pct_from_52w_low": r(row["dist_52w_low"], 100, 1),
     }
     stats = {k: v for k, v in stats.items() if v is not None}
+    try:
+        import street
+        sv = street.for_prompt(street.get(str(row.get("yf_symbol") or row["symbol"]), float(row["price"])))
+        if sv:
+            stats["street_view"] = sv
+    except Exception:
+        pass
     if is_leveraged(name):
         stats["instrument"] = "leveraged/inverse ETF (see name for leverage and underlying)"
     news_txt = "\n".join(
@@ -904,6 +916,19 @@ def format_alert(row: pd.Series, name: str, a: dict, news: list[dict], mode: str
         f"(idio {row['idio_z']:+.1f}σ) · {e(name)} [{tag}]{lev}",
         stats_line,
     ]
+    if plan:
+        import quant
+        card = quant.trade_card(plan)
+        if card:
+            lines.append(card)
+    try:
+        import street
+        sv = street.get(str(row.get("yf_symbol") or row["symbol"]), float(row["price"]))
+        sl = street.line(sv, plan.get("target") if plan and plan.get("edge") else None)
+        if sl:
+            lines.append(sl)
+    except Exception as ex:
+        print(f"  street line failed: {ex}", file=sys.stderr)
     if not pd.isna(row.get("earn_ratio", np.nan)):
         lines.append(f"Earnings: move is <b>{row['earn_ratio']:.1f}×</b> its typical reaction "
                      f"(avg ±{row['earn_avg']*100:.1f}% over last {int(row['earn_n'])})")
