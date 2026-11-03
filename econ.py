@@ -165,7 +165,7 @@ def classify(ev: dict, lines: list[str]) -> str | None:
                        "\n\nIn ONE short line (max 15 words): actual vs forecast, and whether that is "
                        "hot/strong, soft/weak or in line for the currency. If the lines don't contain "
                        "the actual, reply exactly: unknown"}])
-        txt = msg.content[0].text.strip()
+        txt = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text").strip()
         return None if txt.lower().startswith("unknown") else txt
     except Exception as e:
         print(f"classify failed: {e}", file=sys.stderr)

@@ -195,6 +195,29 @@ async def run(login_only: bool) -> None:
     if not api_id or not api_hash:
         sys.exit("Set TG_API_ID and TG_API_HASH in .env (from my.telegram.org).")
     client = TelegramClient(str(HERE / "squawk"), int(api_id), api_hash)
+    if not login_only:
+        # As a service there is no keyboard: if the saved login is gone, say so ONCE and wait,
+        # instead of crash-looping on the phone-number prompt.
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            flag = HERE / ".listener_logged_out"
+            if not flag.exists():
+                flag.write_text(datetime.now(timezone.utc).isoformat())
+                try:
+                    from scanner import send_telegram
+                    send_telegram("⚠️ <b>Live squawk listener is logged out of Telegram</b> — instant headlines are "
+                                  "paused (the 5-min news feed still runs). To fix, in the server console run:\n"
+                                  "<code>sudo systemctl stop move-alerts-listener</code>\n"
+                                  "<code>cd ~/move-alerts &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; "
+                                  ".venv/bin/python listener.py --login</code>\n"
+                                  "<code>sudo systemctl start move-alerts-listener</code>", force=True)
+                except Exception:
+                    pass
+            print("Not logged in — run: python listener.py --login. Waiting 1h.", file=sys.stderr, flush=True)
+            await asyncio.sleep(3600)
+            sys.exit(1)
+        (HERE / ".listener_logged_out").unlink(missing_ok=True)
     await client.start()   # first time: asks for your phone number and the login code
     me = await client.get_me()
     print(f"Logged in as {me.first_name}.", flush=True)

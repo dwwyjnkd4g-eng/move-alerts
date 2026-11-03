@@ -136,7 +136,7 @@ def summary(data: dict[str, dict]) -> list[str]:
                        "catalyst' otherwise). Mention cross-asset links where the numbers show them. If it's quiet, "
                        "one bullet saying so is fine. No invented facts.\n\nBIGGEST MOVERS (by 30-min sigma)\n"
                        f"{mv}\n\nHEADLINES (last hour)\n{headlines_block(heads)}"}])
-        return [l.strip() for l in msg.content[0].text.splitlines() if l.strip().startswith("•")][:4]
+        return [l.strip() for l in "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text").splitlines() if l.strip().startswith("•")][:4]
     except Exception as ex:
         print(f"summary failed: {ex}", file=sys.stderr)
         return []

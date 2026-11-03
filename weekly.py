@@ -127,7 +127,7 @@ def themes(cal: dict[str, list[str]]) -> list[str]:
                        "bullets: the key themes and events to watch and why. No invented facts. Output just "
                        "the bullets, each starting with '• '.\n\nCALENDAR\n" + cal_txt +
                        f"\n\nHEADLINES\n{headlines_block(heads)}"}])
-        return [l.strip() for l in msg.content[0].text.splitlines() if l.strip().startswith("•")][:6]
+        return [l.strip() for l in "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text").splitlines() if l.strip().startswith("•")][:6]
     except Exception as e:
         print(f"themes failed: {e}", file=sys.stderr)
         return []

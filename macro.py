@@ -100,7 +100,7 @@ INSTRUMENTS = [
     ("Uranium (URA)", "yf_prepost", "URA", 0.025),
     ("Lithium & battery (LIT)", "yf_prepost", "LIT", 0.025),
     # ...plus proxies that trade in UK/European and Asian hours
-    ("Dry bulk shippers (Oslo)", "basket", "HSHP.OL+BELCO.OL+2020.OL", 0.025),
+    ("Dry bulk shippers (Oslo)", "basket", "HSHP.OL+2020.OL", 0.025),
     ("Tanker shippers (Oslo)", "basket", "FRO.OL+HAFNI.OL+OET.OL", 0.025),
     ("Uranium (Yellow Cake, London)", "yf", "YCA.L", 0.025),
     ("Lithium miners (ASX)", "basket", "PLS.AX+MIN.AX+LTR.AX", 0.035),
