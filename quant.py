@@ -1080,9 +1080,23 @@ def odds_adjust(plan: dict, cats: set[str], min_imp: int, mkt: str, confirm: boo
                 plan["risk_size"] /= f ** 2
                 notes.append(f"stop ×{f:.2f}, size ÷{f**2:.2f} for {e0['event'][:60]} ({e0['price']})")
     if moves:
-        plan["kelly_half"] *= 0.5
-        plan["risk_size"] *= 0.5
-        notes.append("event odds repriced with this move (prediction markets) — likely information, size halved")
+        # how hard to act is decided by the latest predict_backtest.py verdict (re-run weekly)
+        try:
+            bt = json.loads((CACHE / "predict_backtest_summary.json").read_text())
+        except Exception:
+            bt = {}
+        t_bt, fade_c = bt.get("confirmed_vs_unconfirmed_t"), bt.get("fade_confirmed_avg")
+        if t_bt is not None and t_bt <= -2 and fade_c is not None and fade_c < 0:
+            plan.update({"edge": False, "note": f"event odds repriced with this move — in the odds backtest, moves "
+                                                f"like this kept going (fade avg {fade_c*100:+.2f}%, t={t_bt:.1f}), so no fade"})
+            return plan
+        if t_bt is not None and t_bt >= 0:
+            notes.append(f"event odds repriced with this move — but the odds backtest found no difference (t={t_bt:.1f}), size unchanged")
+        else:
+            plan["kelly_half"] *= 0.5
+            plan["risk_size"] *= 0.5
+            notes.append("event odds repriced with this move (prediction markets) — likely information, size halved"
+                         + (f" (odds backtest t={t_bt:.1f})" if t_bt is not None else ""))
     tgt, stp = plan["tgt_pct"], plan["stop_pct"]
     plan["rr"] = tgt / stp if stp else 0
     plan["target"] = plan["entry"] * (1 + sgn * tgt)

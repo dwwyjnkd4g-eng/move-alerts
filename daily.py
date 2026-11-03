@@ -348,6 +348,10 @@ def build_messages(now: datetime) -> list[str]:
         odds = predict.board_lines(10)
         if odds:
             m2 += ["", "<b>Prediction markets are pricing</b>"] + [f"• {e(x)}" for x in odds]
+        import scenarios
+        sc = scenarios.brief_lines(2)
+        if sc:
+            m2 += ["", "<b>What the odds imply</b> (move if each outcome happens)"] + [e(x) for x in sc]
     except Exception as ex:
         print(f"odds block failed: {ex}", file=sys.stderr)
     return (["\n".join(m1)] + (["\n".join(m1b)] if m1b else [])

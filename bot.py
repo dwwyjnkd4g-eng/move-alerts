@@ -17,6 +17,7 @@ if your alerts go to a channel). Commands:
   /paper                        paper-trading book: open trades and results so far
   /odds                         what prediction markets are pricing (Fed, elections, geopolitics…)
   /edges                        prediction-market mispricings live now + Fed odds vs futures
+  /scenarios                    what each outcome (Fed, elections, tariffs…) would do to gold, USD, yields, stocks
   /cot                          latest CFTC positioning
   /week                         week-ahead preview
   /mute 2h | 30m                pause alerts       /unmute   resume
@@ -147,6 +148,11 @@ def cmd_scorecard(_args: str) -> str:
     return followups.scorecard_text()
 
 
+def cmd_scenarios(_args: str) -> str:
+    import scenarios
+    return scenarios.show_text()
+
+
 def cmd_edges(_args: str) -> str:
     import predict_edge
     return predict_edge.edges_text()
@@ -182,7 +188,7 @@ COMMANDS = {
     "add": cmd_add, "remove": cmd_remove, "holdperiod": cmd_holdperiod, "holdings": cmd_holdings,
     "why": cmd_why, "brief": cmd_brief, "levels": cmd_levels, "scorecard": cmd_scorecard,
     "cot": cmd_cot, "week": cmd_week, "snapshot": cmd_snapshot, "markets": cmd_snapshot,
-    "paper": cmd_paper, "odds": cmd_odds, "edges": cmd_edges,
+    "paper": cmd_paper, "odds": cmd_odds, "edges": cmd_edges, "scenarios": cmd_scenarios,
 }
 SLOW = {"paper", "why", "brief", "holdings", "scorecard", "cot", "week", "levels", "snapshot", "markets"}
 

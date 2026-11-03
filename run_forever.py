@@ -12,12 +12,15 @@ thread so a slow job never delays the others, and records results in runner_stat
                     predict_edge.py (prediction-market mispricings vs futures / other venue / themselves),
                     watchdog (listener/bot services, disk space)
   every 30 min      divergence.py, snapshot.py (market update across the 48 macro markets)
+  06:30 UK daily    scenarios.py --fit (event betas: how assets move per change in prediction-market odds)
+  every 15 min      scenarios.py --lag (assets lagging what the odds imply)
   07:00 UK daily    daily.py (morning brief)
   07:30 UK daily    scanner.py --refresh (whole US market list + liquidity screen + history)
   21:20 UK Mon-Fri  followups.py (fade follow-ups)
   21:30 UK daily    paper.py --report (paper book)
   03:30 UK daily    housekeeping (trim logs and old cache files)
   Sun 02:00 / 04:00 backtest.py US / Europe (refreshes the backtest prior the analyst sees)
+  Sun 05:00         predict_backtest.py (do prediction-market odds help the fade call? sets the live rule)
   any job failing 3 times in a row -> one Telegram warning, and a note when it recovers
   Fri 21:00 - Sat   cot.py hourly (sends once per new CFTC report)
   Sun 18:00 UK      weekly.py (week-ahead + scorecard)
@@ -39,7 +42,7 @@ HERE = Path(__file__).resolve().parent
 LONDON = ZoneInfo("Europe/London")
 STATUS = HERE / "runner_status.json"
 PY = sys.executable
-TIMEOUTS = {"predict.py": 240, "predict_edge.py": 300, "backtest-us": 7200, "backtest-eu": 7200, "paper.py": 600, "scanner.py": 1800, "scanner-refresh": 3600, "europe.py": 1800, "europe-refresh": 2400,
+TIMEOUTS = {"scenarios-fit": 1800, "scenarios-lag": 300, "backtest-odds": 5400, "predict.py": 240, "predict_edge.py": 300, "backtest-us": 7200, "backtest-eu": 7200, "paper.py": 600, "scanner.py": 1800, "scanner-refresh": 3600, "europe.py": 1800, "europe-refresh": 2400,
             "weekly.py": 1800, "cot.py": 600, "macro.py": 600, "snapshot.py": 600, "divergence.py": 600,
             "holdings.py": 600, "daily.py": 900}
 
@@ -200,6 +203,7 @@ def main() -> None:
             launch("holdings.py", "holdings.py", "--watch")
             launch("paper.py", "paper.py", "--mark")
             launch("predict_edge.py")
+            launch("scenarios-lag", "scenarios.py", "--lag")
             threading.Thread(target=watchdog, daemon=True).start()
         if last.get("30") != slot30:
             last["30"] = slot30
@@ -208,6 +212,9 @@ def main() -> None:
         if (now.hour, now.minute) >= (7, 30) and last.get("refresh") != now.date():
             last["refresh"] = now.date()      # whole-US-market universe + history, before US pre-market
             launch("scanner-refresh", "scanner.py", "--refresh")
+        if (now.hour, now.minute) >= (6, 30) and last.get("scen-fit") != now.date():
+            last["scen-fit"] = now.date()     # event betas: odds history vs asset prices
+            launch("scenarios-fit", "scenarios.py", "--fit")
         if (now.hour, now.minute) >= (6, 45) and last.get("eu-refresh") != now.date():
             last["eu-refresh"] = now.date()   # UK/Europe universe + history, before London opens
             launch("europe-refresh", "europe.py", "--refresh")
@@ -233,6 +240,9 @@ def main() -> None:
         if now.weekday() == 6 and now.hour == 4 and last.get("bt-eu") != now.date():
             last["bt-eu"] = now.date()
             launch("backtest-eu", "backtest.py", "--market", "eu", "--years", "3", "--telegram")
+        if now.weekday() == 6 and now.hour == 5 and last.get("bt-odds") != now.date():
+            last["bt-odds"] = now.date()
+            launch("backtest-odds", "predict_backtest.py", "--telegram")
         if now.weekday() == 6 and now.hour == 18 and last.get("weekly") != now.date():
             last["weekly"] = now.date()
             launch("weekly.py")
