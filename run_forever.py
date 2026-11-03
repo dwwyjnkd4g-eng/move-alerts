@@ -9,6 +9,7 @@ thread so a slow job never delays the others, and records results in runner_stat
   every 15 min      macro.py, scanner.py (it picks pre-market / live / close / after-hours),
                     europe.py (UK & European stocks, London hours),
                     holdings.py --watch, paper.py --mark (paper-trading ledger),
+                    predict_edge.py (prediction-market mispricings vs futures / other venue / themselves),
                     watchdog (listener/bot services, disk space)
   every 30 min      divergence.py, snapshot.py (market update across the 48 macro markets)
   07:00 UK daily    daily.py (morning brief)
@@ -38,7 +39,7 @@ HERE = Path(__file__).resolve().parent
 LONDON = ZoneInfo("Europe/London")
 STATUS = HERE / "runner_status.json"
 PY = sys.executable
-TIMEOUTS = {"predict.py": 240, "backtest-us": 7200, "backtest-eu": 7200, "paper.py": 600, "scanner.py": 1800, "scanner-refresh": 3600, "europe.py": 1800, "europe-refresh": 2400,
+TIMEOUTS = {"predict.py": 240, "predict_edge.py": 300, "backtest-us": 7200, "backtest-eu": 7200, "paper.py": 600, "scanner.py": 1800, "scanner-refresh": 3600, "europe.py": 1800, "europe-refresh": 2400,
             "weekly.py": 1800, "cot.py": 600, "macro.py": 600, "snapshot.py": 600, "divergence.py": 600,
             "holdings.py": 600, "daily.py": 900}
 
@@ -198,6 +199,7 @@ def main() -> None:
             launch("europe.py")
             launch("holdings.py", "holdings.py", "--watch")
             launch("paper.py", "paper.py", "--mark")
+            launch("predict_edge.py")
             threading.Thread(target=watchdog, daemon=True).start()
         if last.get("30") != slot30:
             last["30"] = slot30

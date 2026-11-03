@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -467,7 +468,9 @@ def fit_gbm(train: pd.DataFrame):
     except Exception:
         return None
     train = _numeric(train)
-    cols = [c for c in FEATURES if c in train]
+    cols = [c for c in FEATURES if c in train and train[c].notna().mean() > 0.05 and train[c].nunique() > 1]
+    if not cols:
+        return None
     models = {}
     for h in HORIZONS:
         y = train[f"fade_{h}"]
@@ -477,8 +480,11 @@ def fit_gbm(train: pd.DataFrame):
         m = HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=300, min_samples_leaf=40,
                                           l2_regularization=1.0, early_stopping=True, validation_fraction=0.2,
                                           n_iter_no_change=20, random_state=0)
-        m.fit(train.loc[ok, cols].to_numpy(dtype="float64"), y[ok].to_numpy(dtype="float64"))
-        models[h] = m
+        try:
+            m.fit(train.loc[ok, cols].to_numpy(dtype="float64"), y[ok].to_numpy(dtype="float64"))
+            models[h] = m
+        except Exception as e:
+            print(f"  tree model h={h} skipped: {e}", file=sys.stderr)
     return {"cols": cols, "models": models} if models else None
 
 
@@ -829,6 +835,10 @@ def equity_plan(row, closes: pd.DataFrame, base: dict, intraday_close: pd.Series
                            "own_n": own.get(5, {}).get("n", 0)},
                  "own": {h: own.get(h, {}) for h in HORIZONS}, "x": x})
     plan["prior"] = backtest_prior("us" if mkt == "us" else "eu")
+    try:
+        odds_adjust(plan, EQUITY_ODDS_CATS, min_imp=3, mkt=mkt, confirm=False)
+    except Exception as e:
+        print(f"  odds layer failed: {e}", file=sys.stderr)
     if plan.get("edge") and plan.get("score", 0) < MIN_PLAN_SCORE:
         plan.update({"edge": False, "score_raw": plan["score"],
                      "note": f"edge score {plan['score']}/100 is below {MIN_PLAN_SCORE} — in the backtest, "
@@ -851,6 +861,15 @@ MACRO_H = [1, 2, 4, 8, 24, 48, 72]
 
 
 def macro_plan(src: str, sym: str, st: dict) -> dict:
+    plan = _macro_plan(src, sym, st)
+    try:
+        odds_adjust(plan, macro_odds_cats(src, sym), min_imp=2, mkt="us", confirm=True)
+    except Exception as e:
+        print(f"  odds layer failed for {sym}: {e}", file=sys.stderr)
+    return plan
+
+
+def _macro_plan(src: str, sym: str, st: dict) -> dict:
     try:
         if src == "kraken":
             from macro import kraken_closes
@@ -933,6 +952,149 @@ def macro_plan(src: str, sym: str, st: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Prediction-market odds layer
+# --------------------------------------------------------------------------
+# Scheduled binary events priced by Polymarket/Kalshi inside the hold window: the closer to a coin
+# flip, the more a hold through it is a bet on the event rather than on reversion. So:
+#   uncertainty u = 4p(1-p) for a yes/no market, 2(1 - top outcome) for multi-outcome (0 = settled, 1 = coin flip)
+#   top-importance event with u >= 0.6  -> exit before it (hold capped), or no trade if it's too close
+#   otherwise                           -> stop widened x(1 + 0.35*u*imp/3), size cut by that factor squared
+# And for macro markets: if a linked event repriced >= 10 pts in the last 2h, the move is probably
+# information rather than flow -> size halved and the analyst is told (it already sees the odds moves).
+# Rule-based for now: odds are being logged so these can be fitted/backtested once there's history.
+MACRO_ODDS_CATS = {"fed_rates", "central_banks", "inflation_data", "growth_recession", "geopolitics_conflict",
+                   "trade_tariffs", "fiscal_debt", "us_politics", "elections_global"}
+EQUITY_ODDS_CATS = {"fed_rates", "inflation_data", "growth_recession", "trade_tariffs", "geopolitics_conflict",
+                    "us_politics", "fiscal_debt"}
+ODDS_U_CAP = 0.6
+ODDS_K = 0.35
+
+
+def macro_odds_cats(src: str, sym: str) -> set[str]:
+    s = sym.upper()
+    if src == "kraken" or "BTC" in s or "XBT" in s:
+        return {"crypto_policy", "fed_rates", "us_politics", "trade_tariffs"}
+    if re.match(r"^(CL|BZ|NG|RB|HO)=F$", s) or s in ("USO", "UNG", "XLE"):
+        return {"energy", "geopolitics_conflict", "trade_tariffs", "growth_recession"}
+    if re.match(r"^(ZC|ZW|ZS|ZM|ZL|KE|KC|SB|CC|CT|LE|HE|GF|OJ)=F$", s):
+        return {"trade_tariffs", "commodities_weather", "geopolitics_conflict"}
+    return MACRO_ODDS_CATS
+
+
+def _parse_ts(x) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+        return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def odds_events(cats: set[str], min_imp: int, until: datetime) -> list[dict]:
+    """Scheduled prediction-market events resolving between now and `until`, with their uncertainty."""
+    try:
+        import predict
+        snap = predict.load_snapshot(max_age_min=60)
+    except Exception:
+        return []
+    now = datetime.now(timezone.utc)
+    groups: dict[str, list[dict]] = {}
+    for m in snap:
+        if m.get("cat") not in cats or (m.get("imp") or 1) < min_imp:
+            continue
+        if re.search(r"\b(by|before)\b", m.get("event", ""), re.I):    # deadline markets can resolve any time
+            continue
+        end = _parse_ts(m.get("end"))
+        if end is None or not (now < end <= until):
+            continue
+        groups.setdefault(m["ekey"], []).append({**m, "_end": end})
+    out = []
+    for k, ms in groups.items():
+        top = max(ms, key=lambda m: m["p"])
+        if len(ms) == 1:
+            u = 4 * top["p"] * (1 - top["p"])
+            price = f"{top['p']*100:.0f}% yes"
+        else:
+            u = min(1.0, 2 * (1 - top["p"]))
+            price = " / ".join(f"{(m['label'] or 'yes')[:22]} {m['p']*100:.0f}%" for m in sorted(ms, key=lambda m: -m["p"])[:3])
+        out.append({"event": top["event"][:90], "price": price, "u": u, "imp": int(top.get("imp") or 1),
+                    "end": min(m["_end"] for m in ms), "venue": top["venue"]})
+    out.sort(key=lambda e: -e["u"] * e["imp"])
+    return out
+
+
+def odds_adjust(plan: dict, cats: set[str], min_imp: int, mkt: str, confirm: bool) -> dict:
+    if not plan:
+        return plan
+    now = datetime.now(timezone.utc)
+    x = plan.get("exit_by")
+    if isinstance(x, datetime):
+        until = x.astimezone(timezone.utc)
+    elif isinstance(x, date):
+        until = datetime(x.year, x.month, x.day, 23, 59, tzinfo=timezone.utc)
+    else:
+        until = now + timedelta(days=5)
+    evs = odds_events(cats, min_imp, until)
+    plan["odds_events"] = [f"{e['event']}: {e['price']} (resolves {e['end']:%a %d %b}, uncertainty {e['u']:.2f})" for e in evs[:3]]
+    moves = []
+    if confirm:
+        try:
+            import predict
+            moves = predict.recent_moves(hours=2, cats=cats, min_imp=2, min_d=0.10)
+        except Exception:
+            moves = []
+        plan["odds_moves"] = [r["text"] for r in moves[-3:]]
+    if not plan.get("edge"):
+        return plan
+    notes = plan.setdefault("notes", [])
+    sgn = 1 if plan["side"] == "long" else -1
+    if evs:
+        e0 = evs[0]
+        if e0["u"] >= ODDS_U_CAP and e0["imp"] >= 3:
+            if plan.get("unit") == "h":
+                hrs = (e0["end"] - now).total_seconds() / 3600
+                new_h = int(hrs - 1)
+                if new_h < 1:
+                    plan.update({"edge": False, "note": f"coin-flip event inside the hold: {e0['event']} ({e0['price']})"})
+                    return plan
+                if new_h < plan["hold"]:
+                    plan["hold"] = new_h
+                    plan["exit_by"] = now + timedelta(hours=new_h)
+            else:
+                today = now.date()
+                days = trading_days_between(today, e0["end"].date(), mkt)
+                if days < 2:
+                    plan.update({"edge": False, "note": f"coin-flip event inside the hold: {e0['event']} ({e0['price']})"})
+                    return plan
+                new_h = min(plan["hold"], days - 1)
+                if new_h < plan["hold"]:
+                    plan["hold"] = new_h
+                    plan["exit_by"] = add_trading_days(today, new_h, mkt)
+            if plan.get("A") and plan.get("kappa"):
+                plan["tgt_pct"] = plan["A"] * (1 - math.exp(-plan["kappa"] * plan["hold"]))
+            notes.append(f"hold cut to exit before {e0['event'][:60]} ({e0['price']}) — priced near a coin flip")
+        else:
+            f = 1 + ODDS_K * e0["u"] * e0["imp"] / 3
+            if f > 1.02:
+                plan["stop_pct"] *= f
+                plan["kelly_half"] /= f ** 2
+                plan["risk_size"] /= f ** 2
+                notes.append(f"stop ×{f:.2f}, size ÷{f**2:.2f} for {e0['event'][:60]} ({e0['price']})")
+    if moves:
+        plan["kelly_half"] *= 0.5
+        plan["risk_size"] *= 0.5
+        notes.append("event odds repriced with this move (prediction markets) — likely information, size halved")
+    tgt, stp = plan["tgt_pct"], plan["stop_pct"]
+    plan["rr"] = tgt / stp if stp else 0
+    plan["target"] = plan["entry"] * (1 + sgn * tgt)
+    plan["stop"] = plan["entry"] * (1 - sgn * stp)
+    plan["stretch"] = max(plan["stretch"], plan["target"]) if sgn > 0 else min(plan["stretch"], plan["target"])
+    if plan["rr"] < MIN_RR or tgt <= (plan.get("cost") or 0):
+        plan.update({"edge": False, "note": f"after the prediction-market event adjustment the reward/risk is too thin "
+                                            f"(R/R {plan['rr']:.2f})"})
+    return plan
+
+
+# --------------------------------------------------------------------------
 # Presentation
 # --------------------------------------------------------------------------
 def _p(x, d=1):
@@ -998,6 +1160,10 @@ def plan_lines(plan: dict, ccy_note: str = "") -> list[str]:
         mean5 = plan.get("mean5")
         out.append(f"📐 <b>Quant: no fade edge</b> — {e(plan.get('note', ''))}"
                    + (f" (avg {_p(mean5)}, n={plan.get('n', 0)})" if mean5 is not None else ""))
+    if plan.get("odds_events"):
+        out.append("   🎲 Event odds in window: " + e(" · ".join(plan["odds_events"][:2])))
+    if plan.get("odds_moves"):
+        out.append("   🎲 Odds moved with this: " + e(" · ".join(plan["odds_moves"][:2])))
     r = plan.get("regime") or {}
     if r.get("vix") is not None:
         out.append(f"   Regime: <b>{e(r['label'])}</b> · VIX {r['vix']:.1f}"
@@ -1047,6 +1213,8 @@ def plan_for_prompt(plan: dict) -> dict:
     keep["notes"] = plan.get("notes")
     keep["regime"] = plan.get("regime")
     keep["model_5d"] = plan.get("model")
+    keep["prediction_market_events_in_hold"] = plan.get("odds_events")
+    keep["prediction_market_repricings_last_2h"] = plan.get("odds_moves")
     if plan.get("prior"):
         keep["backtest_prior"] = plan["prior"]
     if plan.get("score_raw") is not None:

@@ -131,6 +131,8 @@ def fetch_polymarket(pages: int = 5) -> list[dict]:
                 if outcomes and str(outcomes[0]).lower() != "yes":
                     label = (label + " " if label else "") + f"({outcomes[0]})"
                 out.append({
+                    "mutex": bool(ev.get("negRisk")), "n_out": len(ev.get("markets") or []),
+                    "token": (_jl(m.get("clobTokenIds")) or [None])[0],
                     "venue": "Polymarket", "ekey": f"pm:{ev.get('id')}", "event": ev.get("title") or m.get("question"),
                     "mid": f"pm:{m.get('id')}", "question": m.get("question") or "", "label": label.strip(),
                     "p": p, "spread": spread, "vol24": _f(m.get("volume24hr"), 0.0) or 0.0,
@@ -190,6 +192,8 @@ def fetch_kalshi(pages: int = 6) -> list[dict]:
                     prev = _kpx(m, "previous_price_dollars", "previous_price")
                     series = ev.get("series_ticker") or ""
                     out.append({
+                        "mutex": bool(ev.get("mutually_exclusive")), "n_out": len(ev.get("markets") or []),
+                        "token": None,
                         "venue": "Kalshi", "ekey": f"ks:{ev.get('event_ticker')}", "event": ev.get("title") or m.get("title"),
                         "mid": f"ks:{m.get('ticker')}", "question": m.get("title") or "",
                         "label": (m.get("yes_sub_title") or m.get("subtitle") or "").strip(),
@@ -534,7 +538,8 @@ def poll(dry: bool = False) -> int:
             for x in ev["moves"]:
                 st["alerted"][x["mid"]] = x["p"]
             top = ev["moves"][0]
-            st["recent"].append({"ts": now, "text": f"{ev['event'][:90]}"
+            st["recent"].append({"ts": now, "ekey": ev["ekey"], "cat": ev.get("category"), "imp": ev.get("importance", 2),
+                                 "d": round(top["d"], 3), "text": f"{ev['event'][:90]}"
                                  + (f" [{top['label']}]" if top["label"] else "")
                                  + f": {_pct(top['base'])} -> {_pct(top['p'])} {WLABEL[top['w']]} ({ev['venue']})"})
 
@@ -554,8 +559,44 @@ def poll(dry: bool = False) -> int:
     if not dry:
         log_history(rel, now_dt, st)
         _save(STATE, st)
+        save_snapshot(rel, meta, now_dt)
     print(f"Alerted {len(events)} events." if events else "No qualifying moves.")
     return 0
+
+
+SNAPSHOT = HERE / "cache" / "predict_snapshot.json"
+
+
+def save_snapshot(rel: list[dict], meta: dict, now_dt: datetime) -> None:
+    """Current relevant markets, with their AI tags, for predict_edge.py and the quant plans."""
+    try:
+        rows = []
+        for m in rel:
+            info = meta.get(m["ekey"], {})
+            rows.append({k: m.get(k) for k in ("venue", "ekey", "event", "mid", "question", "label", "p", "spread",
+                                               "vol24", "liq", "end", "url", "mutex", "n_out", "token")}
+                        | {"cat": info.get("category"), "imp": info.get("importance", 1), "assets": info.get("assets", "")})
+        SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        _save(SNAPSHOT, {"ts": now_dt.isoformat(timespec="seconds"), "markets": rows})
+    except Exception as e:
+        print(f"  snapshot save failed: {e}", file=sys.stderr)
+
+
+def load_snapshot(max_age_min: float = 30) -> list[dict]:
+    snap = _load(SNAPSHOT, {})
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(snap["ts"])).total_seconds() / 60
+    except Exception:
+        return []
+    return snap.get("markets", []) if age <= max_age_min else []
+
+
+def recent_moves(hours: float = 2, cats: set[str] | None = None, min_imp: int = 2, min_d: float = 0.10) -> list[dict]:
+    """Structured recent repricings (for the quant plans)."""
+    st = _load(STATE, {})
+    now = time.time()
+    return [r for r in st.get("recent", []) if now - r["ts"] <= hours * 3600 and r.get("imp", 2) >= min_imp
+            and abs(r.get("d", 0)) >= min_d and (cats is None or r.get("cat") in cats)]
 
 
 def build_board(rel: list[dict], meta: dict, hist: dict, now: float) -> list[dict]:

@@ -359,6 +359,10 @@ silver vs gold, BTC vs risk)? A move that is NOT confirmed elsewhere is more lik
 geopolitical escalation) tend to persist; FLOW moves (stop runs, thin weekend/Asia liquidity, \
 options/expiry, liquidations, no news) are better fade candidates.
 - Be decisive but calibrated; "unclear" is allowed.
+- PREDICTION MARKETS: if odds on a linked event (Fed, tariffs, war, election) repriced sharply in the same \
+window, the move is information, not flow — lean do_not_fade and say which event. A scheduled event priced \
+near a coin flip inside the plan's hold (prediction_market_events_in_hold) makes holding through it a bet \
+on the event: the plan has already cut the hold or widened the stop; say if that's enough.
 - QUANT PLAN (if present) is the statistical prior from this market's own recent history of similar \
 moves. Judge whether the catalyst and cross-asset picture make this move better or worse than that \
 prior, and say in quant_view whether you'd take, adjust or reject the plan (target, stop, hold).

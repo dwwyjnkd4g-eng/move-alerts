@@ -756,6 +756,10 @@ call fade_candidate only when there is a specific reason this move is flow/overr
 sympathy, index flow, clear overshoot vs the news, washed-out positioning) AND the quant plan has an \
 edge. Otherwise prefer do_not_fade or unclear, and say if the move looks more like a continuation \
 (follow) trade. If the plan says the edge score is below threshold, do not override it into a trade.
+- PREDICTION MARKETS: if the plan lists prediction_market_events_in_hold, a scheduled event priced near a \
+coin flip sits inside the hold — the plan has already shortened the hold or widened the stop; say if that \
+is enough. If PREDICTION-MARKET REPRICINGS show an event this stock is exposed to (tariffs, defence, rates, \
+regulation) repricing at the same time as the move, treat the move as information, not flow.
 - Leveraged/inverse ETFs (instrument field present): judge the move by its UNDERLYING (stock, \
 index or sector named in the fund name) — the ETF should move ~leverage x the underlying, so the \
 catalyst is the underlying's. Note for a fade: daily-reset decay and path dependence make holding \
@@ -832,8 +836,19 @@ def build_prompt(row: pd.Series, name: str, news: list[dict], earnings: list[dic
         f"MOVE STATS\n{json.dumps(stats, indent=1)}\n\n{quant_txt}"
         f"NEWS (last {NEWS_LOOKBACK_DAYS} days, newest first)\n{news_txt}\n\n"
         f"EARNINGS CALENDAR\n{earn_txt}\n\n"
+        + _odds_context() +
         "Assess this move and call record_assessment."
     )
+
+
+def _odds_context() -> str:
+    try:
+        import predict
+        lines = predict.context_lines(6)
+    except Exception:
+        lines = []
+    return ("PREDICTION-MARKET REPRICINGS (last 6h; relevant only if this stock is exposed to the event — e.g. "
+            "tariffs, defence, rates, policy)\n" + "\n".join(lines) + "\n\n") if lines else ""
 
 
 def explain(prompt: str, n_news: int) -> dict:
