@@ -4,7 +4,8 @@ thread so a slow job never delays the others, and records results in runner_stat
 (shown in the morning brief's health check).
 
   every 2 min       econ.py (data heads-ups / results)
-  every 5 min       news.py (polled web sources; squawk channels are live via listener.py)
+  every 5 min       news.py (polled web sources; squawk channels are live via listener.py),
+                    predict.py (Polymarket/Kalshi odds repricings on macro & geopolitical events)
   every 15 min      macro.py, scanner.py (it picks pre-market / live / close / after-hours),
                     europe.py (UK & European stocks, London hours),
                     holdings.py --watch, paper.py --mark (paper-trading ledger),
@@ -37,7 +38,7 @@ HERE = Path(__file__).resolve().parent
 LONDON = ZoneInfo("Europe/London")
 STATUS = HERE / "runner_status.json"
 PY = sys.executable
-TIMEOUTS = {"backtest-us": 7200, "backtest-eu": 7200, "paper.py": 600, "scanner.py": 1800, "scanner-refresh": 3600, "europe.py": 1800, "europe-refresh": 2400,
+TIMEOUTS = {"predict.py": 240, "backtest-us": 7200, "backtest-eu": 7200, "paper.py": 600, "scanner.py": 1800, "scanner-refresh": 3600, "europe.py": 1800, "europe-refresh": 2400,
             "weekly.py": 1800, "cot.py": 600, "macro.py": 600, "snapshot.py": 600, "divergence.py": 600,
             "holdings.py": 600, "daily.py": 900}
 
@@ -189,6 +190,7 @@ def main() -> None:
         if last.get("5") != slot5:          # squawk channels are live via listener.py; this polls the rest
             last["5"] = slot5
             launch("news.py")
+            launch("predict.py")
         if last.get("15") != slot15:
             last["15"] = slot15
             launch("macro.py")

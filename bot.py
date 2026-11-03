@@ -15,6 +15,7 @@ if your alerts go to a channel). Commands:
   /holdperiod DAYS              set your PA minimum holding period
   /scorecard                    how the fade calls have done
   /paper                        paper-trading book: open trades and results so far
+  /odds                         what prediction markets are pricing (Fed, elections, geopolitics…)
   /cot                          latest CFTC positioning
   /week                         week-ahead preview
   /mute 2h | 30m                pause alerts       /unmute   resume
@@ -145,6 +146,11 @@ def cmd_scorecard(_args: str) -> str:
     return followups.scorecard_text()
 
 
+def cmd_odds(_args: str) -> str:
+    import predict
+    return predict.board_text()
+
+
 def cmd_paper(_args: str) -> str:
     import paper
     return paper.report_text()
@@ -170,7 +176,7 @@ COMMANDS = {
     "add": cmd_add, "remove": cmd_remove, "holdperiod": cmd_holdperiod, "holdings": cmd_holdings,
     "why": cmd_why, "brief": cmd_brief, "levels": cmd_levels, "scorecard": cmd_scorecard,
     "cot": cmd_cot, "week": cmd_week, "snapshot": cmd_snapshot, "markets": cmd_snapshot,
-    "paper": cmd_paper,
+    "paper": cmd_paper, "odds": cmd_odds,
 }
 SLOW = {"paper", "why", "brief", "holdings", "scorecard", "cot", "week", "levels", "snapshot", "markets"}
 

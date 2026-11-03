@@ -399,12 +399,23 @@ def explain(name: str, st: dict, snapshot: dict, heads: list[dict], plan: dict |
         + (f"QUANT PLAN (from this market's own last ~60 days of similar moves)\n"
            f"{json.dumps(__import__('quant').plan_for_prompt(plan), indent=1, default=str)}\n\n" if plan else "") +
         f"HEADLINES (last {HEADLINE_HOURS}h, newest first)\n{headlines_block(heads)}\n\n"
+        + _odds_block() +
         "Assess this move and call record_assessment."
     )
     from llm import tool_call
     from scanner import sanitize_assessment
     a = tool_call(CLAUDE_MODEL, TOOL, [{"role": "user", "content": prompt}], system=SYSTEM_PROMPT)
     return sanitize_assessment(a, len(heads))
+
+
+def _odds_block() -> str:
+    try:
+        import predict
+        lines = predict.context_lines(6)
+    except Exception:
+        lines = []
+    return ("PREDICTION-MARKET REPRICINGS (last 6h, Polymarket/Kalshi; the crowd's odds on events — a big shift "
+            "with no headline can be the catalyst itself)\n" + "\n".join(lines) + "\n\n") if lines else ""
 
 
 def fmt_price(p: float) -> str:

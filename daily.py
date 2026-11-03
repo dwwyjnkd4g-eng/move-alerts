@@ -343,6 +343,13 @@ def build_messages(now: datetime) -> list[str]:
         m2 += ["<b>Latest headlines</b>"] + [
             f"• {it['ts'].astimezone(LONDON):%H:%M} {e(it['headline'][:180])} ({e(it['source'])})"
             for it in heads[:10]]
+    try:
+        import predict
+        odds = predict.board_lines(10)
+        if odds:
+            m2 += ["", "<b>Prediction markets are pricing</b>"] + [f"• {e(x)}" for x in odds]
+    except Exception as ex:
+        print(f"odds block failed: {ex}", file=sys.stderr)
     return (["\n".join(m1)] + (["\n".join(m1b)] if m1b else [])
             + (["\n".join(m2)] if m2 else []))
 
